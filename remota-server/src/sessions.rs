@@ -359,9 +359,8 @@ async fn plan(
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "session_limit"));
     }
     let pin = |host: String, port: u16| {
-        let policy = policy.clone();
         let denies = state.denies.clone();
-        async move { resolve_pinned(&policy, &denies, effective.protocol, &host, port).await }
+        async move { resolve_pinned(&denies, &host, port).await }
     };
     let target = pin(effective.host.clone(), effective.port)
         .await
@@ -756,7 +755,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{Connection, Credentials, Node, Protocol},
-        policy::{Clipboard, Denies, Policy, Rule},
+        policy::{Clipboard, Denies, Policy},
         router,
         store::Store,
         webos::{fake::FakeWebos, NewCredential, Webos},
@@ -865,7 +864,7 @@ mod tests {
         address
     }
 
-    fn policy(rules: Vec<Rule>, max_user: usize) -> Policy {
+    fn policy(max_user: usize) -> Policy {
         Policy {
             allow_rdp_without_nla: false,
             clipboard: Clipboard {
@@ -875,16 +874,7 @@ mod tests {
             max_sessions_total: 20,
             max_sessions_user: max_user,
             revision: 1,
-            rules,
         }
-    }
-
-    fn allow_loopback() -> Vec<Rule> {
-        vec![Rule {
-            cidr: "127.0.0.0/8".into(),
-            ports: "1-65535".into(),
-            protocols: vec![Protocol::Ssh, Protocol::Rdp],
-        }]
     }
 
     struct Harness {
@@ -897,7 +887,7 @@ mod tests {
     impl Harness {
         /// Remota on a free port; loopback allowed by policy and not denied (tests only).
         async fn new() -> Self {
-            Self::with_policy(policy(allow_loopback(), 5)).await
+            Self::with_policy(policy(5)).await
         }
 
         async fn with_policy(policy: Policy) -> Self {
@@ -1201,13 +1191,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_targets_the_policy_does_not_allow_before_connecting() {
+    async fn refuses_denied_targets_before_connecting() {
         let ssh = ssh_server(random_key(), random_key().public_key().clone()).await;
         let h = Harness::new().await;
         h.add_connection(ADA, ssh, Some(password(PASSWORD))).await;
-        *h.webos.policy.lock().unwrap() = Some(policy(vec![], 5));
-        // A new policy revision is fetched once the cached one is stale; use a fresh client here.
-        let fresh = AppState::with_denies(h.state.store.clone(), h.webos.clone(), Denies::none());
+        // With the built-in denies, the loopback test server is refused.
+        let fresh = AppState::with_denies(h.state.store.clone(), h.webos.clone(), Denies::new([]));
         let app = router(PathBuf::from("missing-ui"), fresh);
         let response = tower::ServiceExt::oneshot(
             app,
@@ -1325,7 +1314,7 @@ mod tests {
     async fn limits_sessions_per_user() {
         let ssh = ssh_server(random_key(), random_key().public_key().clone()).await;
         let h = Harness::new().await;
-        *h.webos.policy.lock().unwrap() = Some(policy(allow_loopback(), 1));
+        *h.webos.policy.lock().unwrap() = Some(policy(1));
         h.add_connection(ADA, ssh, Some(password(PASSWORD))).await;
         assert_eq!(h.start(ADA, json!({ "connectionId": "web" })).await.0, 201);
         let (status, body) = h.start(ADA, json!({ "connectionId": "web" })).await;

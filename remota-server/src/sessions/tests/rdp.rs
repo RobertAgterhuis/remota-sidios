@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 use zeroize::Zeroizing;
 
-use super::{allow_loopback, policy, Harness, ADA, BOB};
+use super::{policy, Harness, ADA, BOB};
 use crate::{
     model::{Connection, Credentials, Node, Protocol, Secret},
     policy::Policy,
@@ -569,7 +569,7 @@ async fn refuses_targets_without_nla_unless_the_policy_allows_them() {
         (reqwest::StatusCode::FORBIDDEN, json!("nla_required"))
     );
 
-    let mut allowing: Policy = policy(allow_loopback(), 5);
+    let mut allowing: Policy = policy(5);
     allowing.allow_rdp_without_nla = true;
     let h = Harness::with_policy(allowing).await;
     h.add_rdp_connection(ADA, target).await;
@@ -613,7 +613,7 @@ async fn opens_the_clipboard_channel_only_when_the_policy_allows_it() {
     for allowed in [false, true] {
         let cert = Arc::new(StdMutex::new(TargetCert::generate()));
         let (target, received) = rdp_target(SecurityProtocol::HYBRID_EX, cert).await;
-        let mut chosen: Policy = policy(allow_loopback(), 5);
+        let mut chosen: Policy = policy(5);
         chosen.clipboard.rdp = allowed;
         let h = Harness::with_policy(chosen).await;
         h.add_rdp_connection(ADA, target).await;

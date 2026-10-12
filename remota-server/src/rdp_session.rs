@@ -96,15 +96,9 @@ async fn accept_certificate(
         .current()
         .await
         .map_err(|refusal: Refusal| ApiError(StatusCode::FORBIDDEN, refusal.code()))?;
-    let address = resolve_pinned(
-        &policy,
-        &state.denies,
-        Protocol::Rdp,
-        &effective.host,
-        effective.port,
-    )
-    .await
-    .map_err(|refusal| ApiError(StatusCode::FORBIDDEN, refusal.code()))?;
+    let address = resolve_pinned(&state.denies, &effective.host, effective.port)
+        .await
+        .map_err(|refusal| ApiError(StatusCode::FORBIDDEN, refusal.code()))?;
     let probe = rdp_inject::probe(address, policy.allow_rdp_without_nla)
         .await
         .map_err(probe_error)?;

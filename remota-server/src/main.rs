@@ -2,7 +2,7 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use remota_server::{
     about::About,
-    policy::{parse_networks, protected_networks, Denies},
+    policy::{docker_host_addresses, parse_networks, protected_networks, Denies},
     router, sessions,
     store::Store,
     webos::{HttpWebos, SharedWebos},
@@ -52,6 +52,8 @@ async fn main() {
         .filter(|host| !host.is_empty())
         .collect();
     let mut denied = protected_networks(&protected);
+    // The Docker host, so users cannot reach the ports SidiOS publishes on it.
+    denied.extend(docker_host_addresses());
     denied.extend(parse_networks(&setting("REMOTA_DENY_CIDRS", "")));
     info!(networks = ?denied, "denied SidiOS networks");
 

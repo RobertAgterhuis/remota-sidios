@@ -1,10 +1,8 @@
-//! The administrator's target policy (SidiOS research R6), enforced before any packet leaves:
-//!
-//! 1. built-in denies that no rule can lift: loopback, link-local (including the cloud metadata
-//!    address), unspecified, multicast, broadcast, the networks SidiOS itself lives on, and any
-//!    extra ranges the operator configures;
-//! 2. the allow list: a target is allowed only if a rule names its address, port, and protocol.
-//!    No rule means everything is refused (fail closed), and so does a policy Remota cannot fetch.
+//! Target checks (SidiOS research R6), enforced before any packet leaves. Every address is allowed
+//! (owner decision, 2026-10-12) except the denies: loopback, link-local (including the cloud
+//! metadata address), unspecified, multicast, broadcast, the networks SidiOS itself lives on, the
+//! Docker host's addresses on Remota's networks, and any extra ranges the operator configures. A
+//! policy Remota cannot fetch still refuses everything (its limits and RDP settings are unknown).
 //!
 //! Names are resolved once; every resolved address must be allowed, and the connection is made to
 //! the first one, so a name cannot be re-pointed (DNS rebinding) between the check and the connect.
@@ -19,7 +17,7 @@ use ipnet::IpNet;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::{model::Protocol, webos::SharedWebos};
+use crate::webos::SharedWebos;
 
 /// How long a fetched policy is used before asking webOS again.
 pub const POLICY_TTL: Duration = Duration::from_secs(30);
@@ -31,13 +29,6 @@ pub struct Clipboard {
     pub ssh: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct Rule {
-    pub cidr: String,
-    pub ports: String,
-    pub protocols: Vec<Protocol>,
-}
-
 /// The policy as webOS serves it (SidiOS `contracts/vault-and-identity.md`).
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -47,15 +38,12 @@ pub struct Policy {
     pub max_sessions_total: usize,
     pub max_sessions_user: usize,
     pub revision: u64,
-    pub rules: Vec<Rule>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The address is denied or no rule allows it.
+    /// The address is denied.
     TargetNotAllowed,
-    /// The address is allowed, but not for this port or protocol.
-    ProtocolNotAllowed,
     /// The name does not resolve.
     Unresolvable,
     /// No policy could be fetched; everything is refused.
@@ -66,7 +54,6 @@ impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
             Self::TargetNotAllowed | Self::Unresolvable => "target_not_allowed",
-            Self::ProtocolNotAllowed => "protocol_not_allowed",
             Self::PolicyUnavailable => "policy_unavailable",
         }
     }
@@ -119,64 +106,9 @@ fn canonical(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// Parses "22", "22,3389", and "8000-8100" lists; anything malformed matches nothing.
-pub fn port_matches(ports: &str, port: u16) -> bool {
-    ports
-        .split(',')
-        .map(str::trim)
-        .any(|part| match part.split_once('-') {
-            Some((low, high)) => match (low.trim().parse::<u16>(), high.trim().parse::<u16>()) {
-                (Ok(low), Ok(high)) => (low..=high).contains(&port),
-                _ => false,
-            },
-            None => part.parse::<u16>() == Ok(port),
-        })
-}
-
-impl Policy {
-    /// Checks one resolved address against the denies and the allow list.
-    pub fn check(
-        &self,
-        denies: &Denies,
-        protocol: Protocol,
-        address: SocketAddr,
-    ) -> Result<(), Refusal> {
-        let ip = canonical(address.ip());
-        if denies.denies(ip) {
-            return Err(Refusal::TargetNotAllowed);
-        }
-        let covering: Vec<&Rule> = self
-            .rules
-            .iter()
-            .filter(|rule| {
-                rule.cidr
-                    .parse::<IpNet>()
-                    .is_ok_and(|net| net.contains(&ip))
-            })
-            .collect();
-        if covering.is_empty() {
-            return Err(Refusal::TargetNotAllowed);
-        }
-        let allowed = covering.iter().any(|rule| {
-            rule.protocols.contains(&protocol) && port_matches(&rule.ports, address.port())
-        });
-        if allowed {
-            Ok(())
-        } else {
-            Err(Refusal::ProtocolNotAllowed)
-        }
-    }
-}
-
 /// Resolves `host` once and answers the address to connect to; every address it resolves to must
 /// be allowed.
-pub async fn resolve_pinned(
-    policy: &Policy,
-    denies: &Denies,
-    protocol: Protocol,
-    host: &str,
-    port: u16,
-) -> Result<SocketAddr, Refusal> {
+pub async fn resolve_pinned(denies: &Denies, host: &str, port: u16) -> Result<SocketAddr, Refusal> {
     let literal = host.trim_start_matches('[').trim_end_matches(']');
     let addresses: Vec<SocketAddr> = match literal.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
@@ -190,8 +122,8 @@ pub async fn resolve_pinned(
         .collect(),
     };
     let first = *addresses.first().ok_or(Refusal::Unresolvable)?;
-    for address in &addresses {
-        policy.check(denies, protocol, *address)?;
+    if addresses.iter().any(|address| denies.denies(address.ip())) {
+        return Err(Refusal::TargetNotAllowed);
     }
     Ok(first)
 }
@@ -265,6 +197,49 @@ pub fn protected_networks(hosts: &[String]) -> Vec<IpNet> {
         .collect()
 }
 
+/// The Docker host's addresses as Remota sees them: the default gateway and, by Docker's
+/// convention, the first address of every network Remota is attached to. Denying them keeps users
+/// off the ports SidiOS publishes on the host. The host's LAN address cannot be seen from inside the
+/// container; operators add it with `REMOTA_DENY_CIDRS`.
+pub fn docker_host_addresses() -> Vec<IpNet> {
+    let mut hosts: Vec<IpNet> = Vec::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces.iter().filter(|i| !i.is_loopback()) {
+            if let Some(IpNet::V4(network)) = interface_network(&interface.addr) {
+                if let Some(first) = network.hosts().next() {
+                    hosts.push(IpNet::from(IpAddr::V4(first)));
+                }
+            }
+        }
+    }
+    if let Ok(routes) = std::fs::read_to_string("/proc/net/route") {
+        hosts.extend(
+            default_gateways(&routes)
+                .into_iter()
+                .map(|ip| IpNet::from(IpAddr::V4(ip))),
+        );
+    }
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// The gateways of default routes in `/proc/net/route` (little-endian hex addresses).
+fn default_gateways(routes: &str) -> Vec<std::net::Ipv4Addr> {
+    routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            (fields.get(1) == Some(&"00000000"))
+                .then(|| u32::from_str_radix(fields.get(2)?, 16).ok())
+                .flatten()
+                .map(|raw| std::net::Ipv4Addr::from(raw.to_le_bytes()))
+        })
+        .filter(|ip| !ip.is_unspecified())
+        .collect()
+}
+
 fn interface_network(addr: &if_addrs::IfAddr) -> Option<IpNet> {
     match addr {
         if_addrs::IfAddr::V4(v4) => {
@@ -293,147 +268,66 @@ pub fn parse_networks(list: &str) -> Vec<IpNet> {
 mod tests {
     use super::*;
 
-    fn policy(rules: &[(&str, &str, &[Protocol])]) -> Policy {
-        Policy {
-            allow_rdp_without_nla: false,
-            clipboard: Clipboard {
-                rdp: false,
-                ssh: true,
-            },
-            max_sessions_total: 20,
-            max_sessions_user: 5,
-            revision: 1,
-            rules: rules
-                .iter()
-                .map(|(cidr, ports, protocols)| Rule {
-                    cidr: (*cidr).into(),
-                    ports: (*ports).into(),
-                    protocols: protocols.to_vec(),
-                })
-                .collect(),
-        }
-    }
-
     fn addr(text: &str) -> SocketAddr {
         text.parse().unwrap()
     }
 
-    const SSH: &[Protocol] = &[Protocol::Ssh];
-    const BOTH: &[Protocol] = &[Protocol::Ssh, Protocol::Rdp];
-
-    #[test]
-    fn refuses_everything_without_rules() {
-        let empty = policy(&[]);
-        let denies = Denies::new([]);
-        for target in ["10.20.0.5:22", "8.8.8.8:22", "[2001:db8::1]:22"] {
-            assert_eq!(
-                empty.check(&denies, Protocol::Ssh, addr(target)),
-                Err(Refusal::TargetNotAllowed)
+    #[tokio::test]
+    async fn allows_every_address_except_the_denies() {
+        let denies = Denies::new(parse_networks("172.30.250.0/24"));
+        for target in ["10.20.0.5", "192.168.1.10", "8.8.8.8", "[2001:db8::1]"] {
+            assert!(
+                resolve_pinned(&denies, target, 22).await.is_ok(),
+                "{target}"
             );
         }
-    }
-
-    #[test]
-    fn allows_only_the_listed_networks_ports_and_protocols() {
-        let allowed = policy(&[
-            ("10.20.0.0/16", "22,3389", BOTH),
-            ("10.30.0.0/16", "2200-2299", SSH),
-        ]);
-        let denies = Denies::new([]);
-        assert_eq!(
-            allowed.check(&denies, Protocol::Ssh, addr("10.20.1.2:22")),
-            Ok(())
-        );
-        assert_eq!(
-            allowed.check(&denies, Protocol::Rdp, addr("10.20.1.2:3389")),
-            Ok(())
-        );
-        assert_eq!(
-            allowed.check(&denies, Protocol::Ssh, addr("10.30.0.9:2250")),
-            Ok(())
-        );
-        assert_eq!(
-            allowed.check(&denies, Protocol::Rdp, addr("10.30.0.9:2250")),
-            Err(Refusal::ProtocolNotAllowed)
-        );
-        assert_eq!(
-            allowed.check(&denies, Protocol::Ssh, addr("10.20.1.2:2222")),
-            Err(Refusal::ProtocolNotAllowed)
-        );
-        assert_eq!(
-            allowed.check(&denies, Protocol::Ssh, addr("10.21.0.1:22")),
-            Err(Refusal::TargetNotAllowed)
-        );
-    }
-
-    #[test]
-    fn built_in_denies_win_over_any_rule() {
-        let everything = policy(&[("0.0.0.0/0", "1-65535", BOTH), ("::/0", "1-65535", BOTH)]);
-        let denies = Denies::new(parse_networks("172.30.250.0/24"));
         for target in [
-            "127.0.0.1:22",
-            "169.254.169.254:80",
-            "0.0.0.0:22",
-            "224.0.0.1:22",
-            "255.255.255.255:22",
-            "[::1]:22",
-            "[fe80::1]:22",
-            "[fd00:ec2::254]:80",
-            "[::ffff:127.0.0.1]:22",
-            "[::ffff:169.254.169.254]:80",
-            "172.30.250.2:3000",
+            "127.0.0.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "[::1]",
+            "[fe80::1]",
+            "[fd00:ec2::254]",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:169.254.169.254]",
+            "172.30.250.2",
         ] {
             assert_eq!(
-                everything.check(&denies, Protocol::Ssh, addr(target)),
+                resolve_pinned(&denies, target, 22).await,
                 Err(Refusal::TargetNotAllowed),
                 "{target}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn resolves_names_once_and_requires_every_address_allowed() {
+        let denies = Denies::new([]);
         assert_eq!(
-            everything.check(&denies, Protocol::Ssh, addr("10.0.0.1:22")),
-            Ok(())
+            resolve_pinned(&denies, "10.1.2.3", 22).await,
+            Ok(addr("10.1.2.3:22"))
+        );
+        // "localhost" resolves to loopback, which is always denied.
+        assert_eq!(
+            resolve_pinned(&denies, "localhost", 22).await,
+            Err(Refusal::TargetNotAllowed)
+        );
+        assert_eq!(
+            resolve_pinned(&denies, "no-such-host.invalid", 22).await,
+            Err(Refusal::Unresolvable)
         );
     }
 
     #[test]
-    fn parses_port_lists_and_ranges_strictly() {
-        assert!(port_matches("22", 22));
-        assert!(port_matches("22, 3389", 3389));
-        assert!(port_matches("8000-8100", 8050));
-        assert!(!port_matches("8000-8100", 8101));
-        assert!(!port_matches("abc", 22));
-        assert!(!port_matches("", 22));
-        assert!(!port_matches("22-", 22));
-    }
-
-    #[tokio::test]
-    async fn resolves_literals_and_names_once_and_requires_every_address_allowed() {
-        let local_only = policy(&[("10.0.0.0/8", "22", SSH)]);
-        let denies = Denies::new([]);
+    fn reads_default_gateways_from_the_routing_table() {
+        let routes = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+            eth0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\n\
+            eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\n";
         assert_eq!(
-            resolve_pinned(&local_only, &denies, Protocol::Ssh, "10.1.2.3", 22).await,
-            Ok(addr("10.1.2.3:22"))
-        );
-        assert_eq!(
-            resolve_pinned(&local_only, &denies, Protocol::Ssh, "[2001:db8::1]", 22).await,
-            Err(Refusal::TargetNotAllowed)
-        );
-        // "localhost" resolves to loopback, which is always denied, even with a rule for it.
-        let loopback = policy(&[("127.0.0.0/8", "22", SSH), ("::1/128", "22", SSH)]);
-        assert_eq!(
-            resolve_pinned(&loopback, &denies, Protocol::Ssh, "localhost", 22).await,
-            Err(Refusal::TargetNotAllowed)
-        );
-        assert_eq!(
-            resolve_pinned(
-                &local_only,
-                &denies,
-                Protocol::Ssh,
-                "no-such-host.invalid",
-                22
-            )
-            .await,
-            Err(Refusal::Unresolvable)
+            default_gateways(routes),
+            vec!["192.168.1.1".parse::<std::net::Ipv4Addr>().unwrap()]
         );
     }
 }

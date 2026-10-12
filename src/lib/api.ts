@@ -94,12 +94,12 @@ const messages: Record<string, string> = {
   no_username: "Set a username on the connection or its folder first.",
   not_found: "It is no longer there.",
   policy_unavailable: "SidiOS could not check the connection policy. Try again in a moment.",
-  protocol_not_allowed: "That port or protocol is not allowed for this address by your administrator.",
   rdp_jump_unsupported: "RDP connections cannot go through a jump host. Remove the jump host.",
   rdp_password_required: "RDP signs in with a password. Save a password for this connection.",
   target_unreachable: "The server could not be reached.",
   session_limit: "You have reached the number of open sessions. Close one and try again.",
-  target_not_allowed: "This address is not allowed by your administrator.",
+  target_not_allowed:
+    "This address cannot be reached from Remota: SidiOS's own networks, the SidiOS host, and loopback or link-local addresses are blocked.",
   ticket_invalid: "The session could not be opened. Try again.",
   parent_not_found: "That folder is no longer there.",
   too_many_iterations:
