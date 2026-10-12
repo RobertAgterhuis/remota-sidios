@@ -10,7 +10,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -20,7 +20,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio_util::sync::CancellationToken;
@@ -74,6 +74,22 @@ struct Endpoint {
 struct Running {
     user: String,
     cancel: CancellationToken,
+    protocol: Protocol,
+    host: String,
+    port: u16,
+    started_at: u64,
+}
+
+/// A running session as the administrator's list shows it: no username, no credential.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningSummary {
+    pub session_id: String,
+    pub user_key: String,
+    pub protocol: &'static str,
+    pub host: String,
+    pub port: u16,
+    pub started_at: u64,
 }
 
 /// Started (not yet opened) and running sessions of this Remota instance.
@@ -118,6 +134,26 @@ impl Sessions {
             .collect()
     }
 
+    /// Every running session, oldest first, for the administrator.
+    pub fn summaries(&self) -> Vec<RunningSummary> {
+        let mut list: Vec<RunningSummary> = self
+            .running
+            .lock()
+            .expect("sessions")
+            .iter()
+            .map(|(id, running)| RunningSummary {
+                session_id: id.clone(),
+                user_key: running.user.clone(),
+                protocol: running.protocol.as_str(),
+                host: running.host.clone(),
+                port: running.port,
+                started_at: running.started_at,
+            })
+            .collect();
+        list.sort_by(|a, b| (a.started_at, &a.session_id).cmp(&(b.started_at, &b.session_id)));
+        list
+    }
+
     /// Ends the named sessions, or every session of `user`, or every session.
     pub fn end(&self, ids: Option<&[String]>, user: Option<&str>) -> usize {
         let running = self.running.lock().expect("sessions");
@@ -160,13 +196,34 @@ async fn start(
         return Err(ApiError(StatusCode::NOT_IMPLEMENTED, "rdp_unavailable"));
     }
     let effective = with_secret(&state, &user.key, &body, effective).await?;
-    let plan = plan(
+    let plan = match plan(
         &state,
         &user.key,
         &effective,
         body.one_time_secret.filter(|_| !body.save_secret),
     )
-    .await?;
+    .await
+    {
+        Ok(plan) => plan,
+        Err(ApiError(status, code)) => {
+            // Policy refusals and limits are audited with the target; the target is the user's own
+            // input, never a credential.
+            if matches!(
+                status,
+                StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+            ) {
+                let event = AuditEvent {
+                    event: "remota.session.refused",
+                    outcome: code,
+                    protocol: Some(effective.protocol.as_str()),
+                    host: Some(effective.host.clone()),
+                    port: Some(effective.port),
+                };
+                state.webos.audit(&user.key, event).await;
+            }
+            return Err(ApiError(status, code));
+        }
+    };
     let ticket = issue(&state.webos, &user.key, &body.connection_id, &plan).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
     state.sessions.pending.lock().expect("sessions").insert(
@@ -336,6 +393,12 @@ async fn open(
         Running {
             user: user.key.clone(),
             cancel: cancel.clone(),
+            protocol: pending.plan.protocol,
+            host: pending.plan.target.host.clone(),
+            port: pending.plan.target.port,
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64),
         },
     );
     let audit = audit_event(&pending.plan);
@@ -496,9 +559,11 @@ struct ControlState {
     token: Arc<String>,
 }
 
-/// The control port (8081) for webOS only: end one session, a user's sessions, or all of them.
+/// The control port (8081) for webOS only: list the running sessions; end one session, a user's
+/// sessions, or all of them.
 pub fn control_router(sessions: Sessions, token: String) -> Router {
     Router::new()
+        .route("/control/sessions", get(list_running))
         .route("/control/terminate", post(terminate))
         .with_state(ControlState {
             sessions,
@@ -506,19 +571,28 @@ pub fn control_router(sessions: Sessions, token: String) -> Router {
         })
 }
 
-async fn terminate(
-    State(state): State<ControlState>,
-    headers: HeaderMap,
-    Json(body): Json<TerminateBody>,
-) -> Response {
+fn authorized(state: &ControlState, headers: &HeaderMap) -> bool {
     let presented = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("");
-    let authorized =
-        !state.token.is_empty() && bool::from(presented.as_bytes().ct_eq(state.token.as_bytes()));
-    if !authorized {
+    !state.token.is_empty() && bool::from(presented.as_bytes().ct_eq(state.token.as_bytes()))
+}
+
+async fn list_running(State(state): State<ControlState>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) {
+        return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    Json(state.sessions.summaries()).into_response()
+}
+
+async fn terminate(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(body): Json<TerminateBody>,
+) -> Response {
+    if !authorized(&state, &headers) {
         return ApiError(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let ids = body.session_id.map(|id| vec![id]);
@@ -1011,6 +1085,19 @@ mod tests {
             h.webos.tickets.lock().unwrap().is_empty(),
             "no ticket for a refused target"
         );
+        {
+            let audits = h.webos.audits.lock().unwrap();
+            let refused = audits
+                .iter()
+                .find(|(_, event)| event.event == "remota.session.refused")
+                .expect("the refusal is audited");
+            assert_eq!(refused.0, ADA);
+            assert_eq!(refused.1.outcome, "target_not_allowed");
+            assert_eq!(
+                refused.1.host.as_deref(),
+                Some(ssh.ip().to_string().as_str())
+            );
+        }
 
         *h.webos.policy.lock().unwrap() = None;
         let unavailable =
@@ -1135,6 +1222,34 @@ mod tests {
 
         let mut socket = open_trusting(&h).await;
         let control = control_router(h.state.sessions.clone(), "control-token".into());
+        let list = |token: &str| {
+            axum::http::Request::get("/control/sessions")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let refused = tower::ServiceExt::oneshot(control.clone(), list("wrong"))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let listed = tower::ServiceExt::oneshot(control.clone(), list("control-token"))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(listed.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        let listed = listed.as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["userKey"], ADA);
+        assert_eq!(listed[0]["protocol"], "ssh");
+        assert_eq!(listed[0]["host"], ssh.ip().to_string());
+        assert_eq!(listed[0]["port"], ssh.port());
+        assert!(listed[0]["startedAt"].as_u64().unwrap() > 0);
+        assert!(!body
+            .windows(PASSWORD.len())
+            .any(|w| w == PASSWORD.as_bytes()));
         let terminate = |token: &str| {
             axum::http::Request::post("/control/terminate")
                 .header("authorization", format!("Bearer {token}"))
