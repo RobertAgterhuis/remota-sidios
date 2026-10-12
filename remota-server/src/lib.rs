@@ -15,6 +15,7 @@ pub mod identity;
 pub mod importer;
 pub mod model;
 pub mod policy;
+pub mod rdp_inject;
 pub mod sessions;
 pub mod ssh;
 pub mod store;
