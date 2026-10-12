@@ -1,6 +1,6 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
-use remota_server::router;
+use remota_server::{router, store::Store};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,12 +17,16 @@ async fn main() {
         .expect("REMOTA_LISTEN must be a socket address");
     let ui_dir =
         PathBuf::from(env::var("REMOTA_UI_DIR").unwrap_or_else(|_| "/opt/remota/ui".to_owned()));
+    let database = PathBuf::from(
+        env::var("REMOTA_DATABASE").unwrap_or_else(|_| "/var/lib/remota/remota.db".to_owned()),
+    );
+    let store = Store::open(&database).expect("failed to open the Remota database");
     let listener = TcpListener::bind(address)
         .await
         .expect("failed to bind Remota server");
 
     info!(%address, ui_dir = %ui_dir.display(), "Remota server listening");
-    axum::serve(listener, router(ui_dir))
+    axum::serve(listener, router(ui_dir, store))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("Remota server failed");
