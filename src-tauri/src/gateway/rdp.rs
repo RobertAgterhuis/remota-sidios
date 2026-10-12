@@ -35,11 +35,17 @@ async fn run(socket: WebSocket) -> Result<(), BoxErr> {
 
     // 1) Read the RDCleanPath request (DER) from the WS and extract destination + X.224.
     let req_bytes = read_rdcleanpath(&mut ws_rx).await?;
-    let pdu = RDCleanPathPdu::from_der(&req_bytes).map_err(|e| format!("bad RDCleanPath DER: {e}"))?;
-    let (destination, x224_req) = match pdu.into_enum().map_err(|e| format!("bad RDCleanPath: {e}"))? {
-        RDCleanPath::Request { destination, x224_connection_request, .. } => {
-            (destination, x224_connection_request.as_bytes().to_vec())
-        }
+    let pdu =
+        RDCleanPathPdu::from_der(&req_bytes).map_err(|e| format!("bad RDCleanPath DER: {e}"))?;
+    let (destination, x224_req) = match pdu
+        .into_enum()
+        .map_err(|e| format!("bad RDCleanPath: {e}"))?
+    {
+        RDCleanPath::Request {
+            destination,
+            x224_connection_request,
+            ..
+        } => (destination, x224_connection_request.as_bytes().to_vec()),
         _ => return Err("expected an RDCleanPath request".into()),
     };
 
@@ -60,7 +66,9 @@ async fn run(socket: WebSocket) -> Result<(), BoxErr> {
     // 4) RDCleanPath response: X.224 confirm + server cert chain + resolved address.
     let resp = RDCleanPathPdu::new_response(format!("{host}:{port}"), x224_resp, certs)
         .map_err(|e| format!("build RDCleanPath response: {e}"))?;
-    let resp_der = resp.to_der().map_err(|e| format!("encode RDCleanPath response: {e}"))?;
+    let resp_der = resp
+        .to_der()
+        .map_err(|e| format!("encode RDCleanPath response: {e}"))?;
     ws_tx.send(Message::Binary(resp_der.into())).await?;
 
     // 5) Relay plaintext RDP bytes: WS <-> TLS (rustls encrypts to the server).
@@ -78,8 +86,8 @@ async fn negotiate_and_tls(
     tcp.write_all(x224_req).await?;
     let x224_resp = read_tpkt(&mut tcp).await?;
 
-    // rustls 0.23 needs the process-default provider (ring) — shared with the relay client.
-    crate::gateway::relay::ensure_crypto_provider();
+    // rustls 0.23 needs one process-default crypto provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAllServerCert))
@@ -123,7 +131,11 @@ async fn relay(
             match tls_rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -233,9 +245,14 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllServerCert {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         use rustls::SignatureScheme as S;
         vec![
-            S::RSA_PKCS1_SHA256, S::RSA_PKCS1_SHA384, S::RSA_PKCS1_SHA512,
-            S::ECDSA_NISTP256_SHA256, S::ECDSA_NISTP384_SHA384,
-            S::RSA_PSS_SHA256, S::RSA_PSS_SHA384, S::RSA_PSS_SHA512,
+            S::RSA_PKCS1_SHA256,
+            S::RSA_PKCS1_SHA384,
+            S::RSA_PKCS1_SHA512,
+            S::ECDSA_NISTP256_SHA256,
+            S::ECDSA_NISTP384_SHA384,
+            S::RSA_PSS_SHA256,
+            S::RSA_PSS_SHA384,
+            S::RSA_PSS_SHA512,
             S::ED25519,
         ]
     }
@@ -258,16 +275,27 @@ mod tests {
         let x224_cr: [u8; 19] = [
             0x03, 0x00, 0x00, 0x13, // TPKT header, len 19
             0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, // X.224 CR
-            0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00, // RDP Neg Req: requestedProtocols = 0x03
+            0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00,
+            0x00, // RDP Neg Req: requestedProtocols = 0x03
         ];
 
         let (_tls, x224_resp, certs) = negotiate_and_tls(&x224_cr, &host, port)
             .await
             .expect("negotiate + TLS to the RDP host");
 
-        println!("X.224 confirm: {} bytes; cert chain: {} cert(s)", x224_resp.len(), certs.len());
-        assert!(x224_resp.first() == Some(&0x03), "X.224 confirm should be a TPKT");
-        assert!(!certs.is_empty(), "should have captured the server certificate chain over TLS");
+        println!(
+            "X.224 confirm: {} bytes; cert chain: {} cert(s)",
+            x224_resp.len(),
+            certs.len()
+        );
+        assert!(
+            x224_resp.first() == Some(&0x03),
+            "X.224 confirm should be a TPKT"
+        );
+        assert!(
+            !certs.is_empty(),
+            "should have captured the server certificate chain over TLS"
+        );
         assert!(certs[0].len() > 100, "the leaf cert should be real DER");
     }
 }

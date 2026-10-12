@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Node, Protocol } from "../lib/vaultApi";
-import { colors, ghostBtn, input, label, primaryBtn } from "./styles";
-import { GatewaySection, type GwForm, emptyGw, gwFromModel, gwToModel } from "./GatewaySection";
-import { open } from "@tauri-apps/plugin-dialog";
+import { colors, input, label, primaryBtn } from "./styles";
+import {
+  GatewaySection,
+  type GwForm,
+  emptyGw,
+  gwFromModel,
+  gwToModel,
+} from "./GatewaySection";
 
-const PROTOCOLS: Protocol[] = ["ssh", "rdp", "vnc", "telnet"];
-const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, vnc: 5900, telnet: 23 };
+const PROTOCOLS: Protocol[] = ["ssh", "rdp"];
+const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389 };
 
 type Props = {
   node: Node | null;
@@ -25,8 +30,6 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
   const [domain, setDomain] = useState("");
   const [keyPath, setKeyPath] = useState("");
   const [gw, setGw] = useState<GwForm>(emptyGw);
-  const [relayUrl, setRelayUrl] = useState("");
-  const [relayAgentId, setRelayAgentId] = useState("");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -41,8 +44,6 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
     setDomain(e?.conn.credentials.domain ?? "");
     setKeyPath(e?.conn.credentials.key_path ?? "");
     setGw(gwFromModel(e?.conn.gateway));
-    setRelayUrl(e?.conn.relay?.url ?? "");
-    setRelayAgentId(e?.conn.relay?.agent_id ?? "");
     setSaved(false);
   }, [node]);
 
@@ -66,10 +67,6 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
             key_path: keyPath || undefined,
           },
           gateway: gwToModel(gw),
-          relay:
-            relayUrl.trim() && relayAgentId.trim()
-              ? { url: relayUrl.trim(), agent_id: relayAgentId.trim() }
-              : undefined,
         },
       };
       await onSave(built);
@@ -79,21 +76,30 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
     }
   }
 
-  async function browseKey() {
-    const p = await open({ multiple: false, title: "Select SSH private key" });
-    if (typeof p === "string") setKeyPath(p);
-  }
-
   const isRdp = protocol === "rdp";
 
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, maxWidth: 420 }}>
+    <form
+      onSubmit={submit}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        padding: 16,
+        maxWidth: 420,
+      }}
+    >
       <h2 style={{ margin: 0, fontSize: 15, color: colors.text }}>
         {editingId ? "Edit connection" : "New connection"}
       </h2>
 
       <Field label="Name">
-        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. web-prod" />
+        <input
+          style={input}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. web-prod"
+        />
       </Field>
 
       <div style={{ display: "flex", gap: 10 }}>
@@ -106,7 +112,7 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
             {PROTOCOLS.map((p) => (
               <option key={p} value={p}>
                 {p.toUpperCase()}
-                {p === "rdp" ? " (beta)" : p === "telnet" ? " (coming soon)" : ""}
+                {p === "rdp" ? " (beta)" : ""}
               </option>
             ))}
           </select>
@@ -122,13 +128,25 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
       </div>
 
       <Field label="Host">
-        <input style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. 192.168.1.10" />
+        <input
+          style={input}
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          placeholder="e.g. 192.168.1.10"
+        />
       </Field>
 
       <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 12 }}>
-        <div style={{ ...label, marginBottom: 8 }}>Credentials (empty = inherit from folder)</div>
+        <div style={{ ...label, marginBottom: 8 }}>
+          Credentials (empty = inherit from folder)
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input style={input} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" />
+          <input
+            style={input}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="username"
+          />
           <input
             style={input}
             type="password"
@@ -137,41 +155,30 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
             placeholder="password"
           />
           {isRdp && (
-            <input style={input} value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="domain (RDP)" />
+            <input
+              style={input}
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              placeholder="domain (RDP)"
+            />
           )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <input style={input} value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="SSH private key (path, optional)" />
-            <button type="button" style={ghostBtn} onClick={browseKey} title="Pick a private key file">Browse…</button>
-          </div>
+          <input
+            style={input}
+            value={keyPath}
+            onChange={(e) => setKeyPath(e.target.value)}
+            placeholder="SSH private key credential (optional)"
+          />
         </div>
       </div>
 
       <GatewaySection value={gw} onChange={setGw} />
 
-      <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 12 }}>
-        <div style={{ ...label, marginBottom: 8 }}>Relay (NAT traversal, optional)</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input
-            style={input}
-            value={relayUrl}
-            onChange={(e) => setRelayUrl(e.target.value)}
-            placeholder="relay URL (e.g. wss://relay.privum.cloud)"
-          />
-          <input
-            style={input}
-            value={relayAgentId}
-            onChange={(e) => setRelayAgentId(e.target.value)}
-            placeholder="agent id (registered on the relay)"
-          />
-        </div>
-        <div style={{ fontSize: 11, color: "#8b949e", marginTop: 6 }}>
-          SSH only for now. Set both to reach this host through the agent (behind NAT). Host above
-          is the target as the agent sees it — use 127.0.0.1 for the agent machine itself.
-        </div>
-      </div>
-
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <button type="submit" disabled={busy || !name || !host} style={{ ...primaryBtn, opacity: busy || !name || !host ? 0.6 : 1 }}>
+        <button
+          type="submit"
+          disabled={busy || !name || !host}
+          style={{ ...primaryBtn, opacity: busy || !name || !host ? 0.6 : 1 }}
+        >
           {busy ? "…" : "Save"}
         </button>
         {editingId && onConnect && (
@@ -184,13 +191,23 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
             Connect ▸
           </button>
         )}
-        {saved && <span style={{ color: "#7ee787", fontSize: 12 }}>Saved ✓</span>}
+        {saved && (
+          <span style={{ color: "#7ee787", fontSize: 12 }}>Saved ✓</span>
+        )}
       </div>
     </form>
   );
 }
 
-function Field({ label: text, children, style }: { label: string; children: ReactNode; style?: CSSProperties }) {
+function Field({
+  label: text,
+  children,
+  style,
+}: {
+  label: string;
+  children: ReactNode;
+  style?: CSSProperties;
+}) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, ...style }}>
       <span style={label}>{text}</span>

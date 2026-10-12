@@ -21,13 +21,15 @@ function allFolderIds(nodes: Node[]): string[] {
 const protoColor: Record<string, string> = {
   ssh: "#7ee787",
   rdp: "#79c0ff",
-  vnc: "#ffa657",
-  telnet: "#d2a8ff",
 };
 
 /** Username efetivo de uma conexão dada a cadeia de defaults das pastas-pai. */
-function effectiveUser(chain: Credentials[], conn: Connection): { value?: string; inherited: boolean } {
-  if (conn.credentials.username) return { value: conn.credentials.username, inherited: false };
+function effectiveUser(
+  chain: Credentials[],
+  conn: Connection,
+): { value?: string; inherited: boolean } {
+  if (conn.credentials.username)
+    return { value: conn.credentials.username, inherited: false };
   for (let i = chain.length - 1; i >= 0; i--) {
     if (chain[i].username) return { value: chain[i].username, inherited: true };
   }
@@ -55,8 +57,22 @@ type Props = {
   onMove: (nodeId: string, targetParentId: string | null) => void;
 };
 
-export function ConnectionTree({ doc, selectedId, onSelect, onOpen, onOpenNew, onDelete, onNewConnection, onNewFolder, onMove }: Props) {
-  const [menu, setMenu] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null);
+export function ConnectionTree({
+  doc,
+  selectedId,
+  onSelect,
+  onOpen,
+  onOpenNew,
+  onDelete,
+  onNewConnection,
+  onNewFolder,
+  onMove,
+}: Props) {
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    items: CtxItem[];
+  } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
@@ -96,7 +112,10 @@ export function ConnectionTree({ doc, selectedId, onSelect, onOpen, onOpenNew, o
     }
     if (node.type === "folder") {
       return [
-        { label: "New connection here", onClick: () => onNewConnection(node.id) },
+        {
+          label: "New connection here",
+          onClick: () => onNewConnection(node.id),
+        },
         { label: "New folder here", onClick: () => onNewFolder(node.id) },
         "sep",
         { label: "Edit", onClick: () => onSelect(node) },
@@ -121,18 +140,53 @@ export function ConnectionTree({ doc, selectedId, onSelect, onOpen, onOpenNew, o
   return (
     <div
       onContextMenu={(e) => openMenu(e, null)}
-      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDropTarget("root"); }}
-      onDrop={(e) => { e.preventDefault(); dnd.onDrop(null); }}
-      style={{ padding: 6, minHeight: "100%", outline: dropTarget === "root" ? `2px dashed ${colors.accent}` : "none", outlineOffset: -2 }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDropTarget("root");
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        dnd.onDrop(null);
+      }}
+      style={{
+        padding: 6,
+        minHeight: "100%",
+        outline: dropTarget === "root" ? `2px dashed ${colors.accent}` : "none",
+        outlineOffset: -2,
+      }}
     >
       {hasFolders && (
-        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", padding: "0 2px 6px" }}>
-          <button type="button" style={miniBtn} onClick={expandAll} title="Expand all folders">Expand all</button>
-          <button type="button" style={miniBtn} onClick={collapseAll} title="Collapse all folders">Collapse all</button>
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            justifyContent: "flex-end",
+            padding: "0 2px 6px",
+          }}
+        >
+          <button
+            type="button"
+            style={miniBtn}
+            onClick={expandAll}
+            title="Expand all folders"
+          >
+            Expand all
+          </button>
+          <button
+            type="button"
+            style={miniBtn}
+            onClick={collapseAll}
+            title="Collapse all folders"
+          >
+            Collapse all
+          </button>
         </div>
       )}
       {doc.nodes.length === 0 ? (
-        <div style={{ padding: 12, color: colors.dim, fontSize: 13 }}>Empty — right-click here to create.</div>
+        <div style={{ padding: 12, color: colors.dim, fontSize: 13 }}>
+          Empty — right-click here to create.
+        </div>
       ) : (
         doc.nodes.map((n) => (
           <TreeNode
@@ -151,7 +205,14 @@ export function ConnectionTree({ doc, selectedId, onSelect, onOpen, onOpenNew, o
           />
         ))
       )}
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -191,25 +252,75 @@ function TreeNode({
         <div
           className="tree-row"
           draggable
-          onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData("text/plain", node.id); e.dataTransfer.effectAllowed = "move"; dnd.onStart(node.id); }}
-          onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "move"; dnd.onOver(node.id); }}
+          onDragStart={(e) => {
+            e.stopPropagation();
+            e.dataTransfer.setData("text/plain", node.id);
+            e.dataTransfer.effectAllowed = "move";
+            dnd.onStart(node.id);
+          }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = "move";
+            dnd.onOver(node.id);
+          }}
           onDragLeave={() => dnd.onLeave()}
-          onDrop={(e) => { e.preventDefault(); e.stopPropagation(); dnd.onDrop(node.id); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dnd.onDrop(node.id);
+          }}
           onClick={() => onSelect(node)}
           onDoubleClick={() => onToggle(node.id)}
           onContextMenu={(e) => onContext(e, node)}
-          style={{ ...rowStyle(node.id === selectedId), paddingLeft: pad, cursor: "pointer", color: colors.dim, ...(dnd.dropTarget === node.id ? { background: "#243447", outline: `1px solid ${colors.accent}` } : {}) }}
+          style={{
+            ...rowStyle(node.id === selectedId),
+            paddingLeft: pad,
+            cursor: "pointer",
+            color: colors.dim,
+            ...(dnd.dropTarget === node.id
+              ? { background: "#243447", outline: `1px solid ${colors.accent}` }
+              : {}),
+          }}
         >
-          <span style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+          <span
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              minWidth: 0,
+            }}
+          >
             <span
-              onClick={(e) => { e.stopPropagation(); if (hasChildren) onToggle(node.id); }}
-              style={{ width: 12, textAlign: "center", fontSize: 10, cursor: hasChildren ? "pointer" : "default" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (hasChildren) onToggle(node.id);
+              }}
+              style={{
+                width: 12,
+                textAlign: "center",
+                fontSize: 10,
+                cursor: hasChildren ? "pointer" : "default",
+              }}
             >
               {hasChildren ? (isCollapsed ? "▸" : "▾") : ""}
             </span>
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.icon ?? "📁"} {node.name}</span>
+            <span
+              style={{
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {node.icon ?? "📁"} {node.name}
+            </span>
           </span>
-          <DeleteBtn onClick={(e) => { e.stopPropagation(); onDelete(node.id); }} />
+          <DeleteBtn
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(node.id);
+            }}
+          />
         </div>
         {!isCollapsed &&
           node.children.map((c) => (
@@ -238,14 +349,21 @@ function TreeNode({
     <div
       className="tree-row"
       draggable
-      onDragStart={(e) => { e.stopPropagation(); e.dataTransfer.setData("text/plain", node.id); e.dataTransfer.effectAllowed = "move"; dnd.onStart(node.id); }}
+      onDragStart={(e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData("text/plain", node.id);
+        e.dataTransfer.effectAllowed = "move";
+        dnd.onStart(node.id);
+      }}
       onClick={() => onSelect(node)}
       onDoubleClick={() => onOpen(node)}
       onContextMenu={(e) => onContext(e, node)}
       title="Double-click to open · drag to move · right-click for options"
       style={{ ...rowStyle(selected), paddingLeft: pad, cursor: "pointer" }}
     >
-      <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+      <span
+        style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
+      >
         <span
           style={{
             fontSize: 10,
@@ -257,11 +375,22 @@ function TreeNode({
         >
           {node.conn.protocol}
         </span>
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
           {node.name}
           <span style={{ color: colors.dim }}> — {node.conn.host}</span>
           {eu.value && (
-            <span style={{ color: eu.inherited ? colors.dim : colors.text, fontStyle: eu.inherited ? "italic" : "normal" }}>
+            <span
+              style={{
+                color: eu.inherited ? colors.dim : colors.text,
+                fontStyle: eu.inherited ? "italic" : "normal",
+              }}
+            >
               {" "}
               ({eu.value}
               {eu.inherited ? " ↳inherited" : ""})
@@ -269,7 +398,12 @@ function TreeNode({
           )}
         </span>
       </span>
-      <DeleteBtn onClick={(e) => { e.stopPropagation(); onDelete(node.id); }} />
+      <DeleteBtn
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(node.id);
+        }}
+      />
     </div>
   );
 }
@@ -304,7 +438,14 @@ function DeleteBtn({ onClick }: { onClick: (e: MouseEvent) => void }) {
     <button
       onClick={onClick}
       title="Delete"
-      style={{ background: "transparent", border: "none", color: colors.dim, cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+      style={{
+        background: "transparent",
+        border: "none",
+        color: colors.dim,
+        cursor: "pointer",
+        fontSize: 14,
+        lineHeight: 1,
+      }}
     >
       ×
     </button>

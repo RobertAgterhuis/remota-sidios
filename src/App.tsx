@@ -1,9 +1,7 @@
 import { type CSSProperties, type ReactNode, useState } from "react";
 import { useVault } from "./state/useVault";
 import { useSessions } from "./state/useSessions";
-import { useUpdate } from "./lib/useUpdate";
 import { VaultUnlock } from "./components/VaultUnlock";
-import { UpdateBanner } from "./components/UpdateBanner";
 import { ConnectionTree } from "./components/ConnectionTree";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { FolderEditor } from "./components/FolderEditor";
@@ -11,45 +9,39 @@ import { TabBar } from "./components/TabBar";
 import { SessionView } from "./components/SessionView";
 import { TrashPanel } from "./components/TrashPanel";
 import { MenuBar, type Menu } from "./components/MenuBar";
-import { findConnWithChain, findNode, findParentId, isInSubtree, nodeExists } from "./lib/tree";
+import {
+  findConnWithChain,
+  findNode,
+  findParentId,
+  isInSubtree,
+  nodeExists,
+} from "./lib/tree";
 import { resolveCreds, resolveGateway } from "./lib/inherit";
 import type { Node } from "./lib/vaultApi";
-import { vaultApi } from "./lib/vaultApi";
-import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { colors } from "./components/styles";
+import { downloadFile, pickFile, uploadFile } from "./lib/browserFiles";
 
-type Editing = { kind: "connection" | "folder"; node: Node | null; parentId: string | null };
+type Editing = {
+  kind: "connection" | "folder";
+  node: Node | null;
+  parentId: string | null;
+};
 
 export default function App() {
   const v = useVault();
   const s = useSessions();
-  const u = useUpdate();
-  const [editing, setEditing] = useState<Editing>({ kind: "connection", node: null, parentId: null });
+  const [editing, setEditing] = useState<Editing>({
+    kind: "connection",
+    node: null,
+    parentId: null,
+  });
   const [active, setActive] = useState<string>("editor");
   const [notice, setNotice] = useState<string | null>(null);
-
-  // Built once and rendered in every branch below — including the locked screen. Whoever has not
-  // opened Remota in a month is exactly the person who has not heard about the release that fixed
-  // something, and they should not have to unlock a vault to find out.
-  const updateBanner = u.policy ? (
-    <UpdateBanner
-      phase={u.phase}
-      delivery={u.policy.delivery}
-      releasesUrl={u.policy.releasesUrl}
-      onInstall={u.install}
-      onDismiss={u.dismiss}
-    />
-  ) : null;
 
   if (v.status === "checking") return <Center>Checking vault…</Center>;
   if (v.status === "locked")
     return (
-      <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
-        {updateBanner}
-        <div style={{ flex: 1, minHeight: 0 }}>
-          <VaultUnlock exists={v.exists} error={v.error} onUnlock={v.unlock} />
-        </div>
-      </div>
+      <VaultUnlock exists={v.exists} error={v.error} onUnlock={v.unlock} />
     );
 
   const selected = editing.node;
@@ -57,7 +49,11 @@ export default function App() {
   const targetParent = selected?.type === "folder" ? selected.id : null;
 
   function selectNode(n: Node) {
-    setEditing({ kind: n.type === "folder" ? "folder" : "connection", node: n, parentId: findParentId(v.tree, n.id) });
+    setEditing({
+      kind: n.type === "folder" ? "folder" : "connection",
+      node: n,
+      parentId: findParentId(v.tree, n.id),
+    });
     setActive("editor");
   }
   function newConnectionAt(parentId: string | null) {
@@ -78,16 +74,25 @@ export default function App() {
 
   async function saveNode(n: Node) {
     // mantém o nó no lugar: existente → pai atual; novo → pai-alvo da criação.
-    const parentId = nodeExists(v.tree, n.id) ? findParentId(v.tree, n.id) : editing.parentId;
+    const parentId = nodeExists(v.tree, n.id)
+      ? findParentId(v.tree, n.id)
+      : editing.parentId;
     await v.save(parentId, n);
-    setEditing({ kind: n.type === "folder" ? "folder" : "connection", node: n, parentId });
+    setEditing({
+      kind: n.type === "folder" ? "folder" : "connection",
+      node: n,
+      parentId,
+    });
   }
 
   async function openConn(id: string, forceNew = false) {
     // Duplo-clique: se já há uma aba aberta desta conexão, volta a ela (não abre outra).
     if (!forceNew) {
       const existing = s.tabs.find((t) => t.connId === id);
-      if (existing) { setActive(existing.id); return; }
+      if (existing) {
+        setActive(existing.id);
+        return;
+      }
     }
     const found = findConnWithChain(v.tree, id);
     if (!found) return;
@@ -104,7 +109,6 @@ export default function App() {
       keyPath: eff.key_path,
       domain: eff.domain,
       gateway: gw,
-      relay: found.node.conn.relay,
     });
     setActive(newId);
   }
@@ -119,15 +123,20 @@ export default function App() {
     const node = findNode(v.tree, nodeId);
     if (!node) return;
     if (findParentId(v.tree, nodeId) === targetParentId) return; // já está lá
-    if (node.type === "folder" && targetParentId && isInSubtree(node, targetParentId)) return; // evita ciclo
+    if (
+      node.type === "folder" &&
+      targetParentId &&
+      isInSubtree(node, targetParentId)
+    )
+      return; // evita ciclo
     await v.save(targetParentId, node);
   }
 
   async function importMremoteng() {
-    const path = await open({ multiple: false, filters: [{ name: "mRemoteNG confCons", extensions: ["xml"] }] });
-    if (typeof path !== "string") return; // cancelado
+    const file = await pickFile(".xml,text/xml,application/xml");
+    if (!file) return;
     try {
-      const r = await vaultApi.importMremoteng(path);
+      const r = await uploadFile("/api/import/mremoteng", file);
       await v.refresh();
       setNotice(r.message);
     } catch (e) {
@@ -136,21 +145,19 @@ export default function App() {
   }
 
   async function exportConnections() {
-    const path = await save({ defaultPath: "remota-connections.json", filters: [{ name: "JSON", extensions: ["json"] }] });
-    if (typeof path !== "string") return;
     try {
-      const r = await vaultApi.exportConnections(path);
-      setNotice(r.message);
+      await downloadFile("/api/export", "remota-connections.json");
+      setNotice("Connections exported.");
     } catch (e) {
       setNotice("Export failed: " + String(e));
     }
   }
 
   async function importRemotaJson() {
-    const path = await open({ multiple: false, filters: [{ name: "JSON Remota", extensions: ["json"] }] });
-    if (typeof path !== "string") return;
+    const file = await pickFile(".json,application/json");
+    if (!file) return;
     try {
-      const r = await vaultApi.importRemotaJson(path);
+      const r = await uploadFile("/api/import/remota", file);
       await v.refresh();
       setNotice(r.message);
     } catch (e) {
@@ -165,18 +172,23 @@ export default function App() {
     const msg = isFolder
       ? `Move the folder "${name}" and its contents to the Trash?`
       : `Move the connection "${name}" to the Trash?`;
-    const ok = await confirm(msg, { title: "Move to Trash", kind: "warning", okLabel: "Move to Trash", cancelLabel: "Cancel" });
+    const ok = window.confirm(msg);
     if (!ok) return;
     await v.remove(id); // soft-delete → lixeira (restaurável)
-    if (selected?.id === id) setEditing({ kind: "connection", node: null, parentId: null });
+    if (selected?.id === id)
+      setEditing({ kind: "connection", node: null, parentId: null });
   }
 
   async function deleteForever(id: string) {
-    const ok = await confirm("Delete this item permanently? This cannot be undone.", { title: "Delete forever", kind: "warning", okLabel: "Delete forever", cancelLabel: "Cancel" });
+    const ok = window.confirm(
+      "Delete this item permanently? This cannot be undone.",
+    );
     if (ok) await v.deleteForever(id);
   }
   async function emptyTrash() {
-    const ok = await confirm("Permanently delete everything in the Trash? This cannot be undone.", { title: "Empty Trash", kind: "warning", okLabel: "Empty Trash", cancelLabel: "Cancel" });
+    const ok = window.confirm(
+      "Permanently delete everything in the Trash? This cannot be undone.",
+    );
     if (ok) await v.emptyTrash();
   }
 
@@ -187,8 +199,14 @@ export default function App() {
         { label: "New connection", onClick: newConnection },
         { label: "New folder", onClick: newFolder },
         "sep",
-        { label: "Import from mRemoteNG (confCons.xml)…", onClick: importMremoteng },
-        { label: "Import connections (Remota JSON)…", onClick: importRemotaJson },
+        {
+          label: "Import from mRemoteNG (confCons.xml)…",
+          onClick: importMremoteng,
+        },
+        {
+          label: "Import connections (Remota JSON)…",
+          onClick: importRemotaJson,
+        },
         { label: "Export connections (JSON)…", onClick: exportConnections },
         "sep",
         { label: "Lock vault", onClick: lock },
@@ -198,22 +216,12 @@ export default function App() {
       title: "Help",
       items: [
         {
-          // A check the user asked for reports the boring answer too; staying silent would look
-          // like the button did nothing.
-          label: "Check for updates now",
-          onClick: async () => {
-            const found = await u.checkNow();
-            if (!found) setNotice("Remota is up to date.");
-          },
+          label: "About Remota",
+          onClick: () =>
+            setNotice(
+              "Remota for SidiOS — AGPL-3.0 source: github.com/RobertAgterhuis/remota-sidios",
+            ),
         },
-        {
-          label: u.policy?.enabled
-            ? "✓ Check for updates automatically"
-            : "Check for updates automatically",
-          onClick: () => void u.setEnabled(!u.policy?.enabled),
-        },
-        "sep",
-        { label: "About Remota", onClick: () => setNotice("Remota — multi-protocol remote connection manager for Linux. Clean-room, AGPLv3.") },
       ],
     },
   ];
@@ -221,7 +229,6 @@ export default function App() {
   return (
     <div style={shell}>
       <MenuBar menus={menus} />
-      {updateBanner}
       <div className="tricolore">
         <span style={{ background: "#009246" }} />
         <span style={{ background: "#f4f4f4" }} />
@@ -230,16 +237,34 @@ export default function App() {
 
       <div style={toolbar}>
         <strong style={{ fontSize: 14, letterSpacing: 0.3 }}>Remota</strong>
-        <div style={{ width: 1, height: 18, background: colors.border, margin: "0 6px" }} />
-        <button style={toolBtn} onClick={newConnection}>+ Connection</button>
-        <button style={toolBtn} onClick={newFolder}>+ Folder</button>
-        <button style={toolBtn} onClick={lock}>Lock</button>
+        <div
+          style={{
+            width: 1,
+            height: 18,
+            background: colors.border,
+            margin: "0 6px",
+          }}
+        />
+        <button style={toolBtn} onClick={newConnection}>
+          + Connection
+        </button>
+        <button style={toolBtn} onClick={newFolder}>
+          + Folder
+        </button>
+        <button style={toolBtn} onClick={lock}>
+          Lock
+        </button>
       </div>
 
       {notice && (
         <div style={banner}>
           <span style={{ fontSize: 13 }}>{notice}</span>
-          <button onClick={() => setNotice(null)} style={{ ...toolBtn, marginLeft: "auto" }}>×</button>
+          <button
+            onClick={() => setNotice(null)}
+            style={{ ...toolBtn, marginLeft: "auto" }}
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -251,36 +276,68 @@ export default function App() {
               doc={v.tree}
               selectedId={selected?.id ?? null}
               onSelect={selectNode}
-              onOpen={(n) => { if (n.type === "connection") openConn(n.id); }}
-              onOpenNew={(n) => { if (n.type === "connection") openConn(n.id, true); }}
+              onOpen={(n) => {
+                if (n.type === "connection") openConn(n.id);
+              }}
+              onOpenNew={(n) => {
+                if (n.type === "connection") openConn(n.id, true);
+              }}
               onDelete={deleteNode}
               onNewConnection={newConnectionAt}
               onNewFolder={newFolderAt}
               onMove={moveNode}
             />
           </div>
-          <TrashPanel trash={v.tree.trash ?? []} onRestore={v.restore} onDeleteForever={deleteForever} onEmpty={emptyTrash} />
+          <TrashPanel
+            trash={v.tree.trash ?? []}
+            onRestore={v.restore}
+            onDeleteForever={deleteForever}
+            onEmpty={emptyTrash}
+          />
         </aside>
 
-        <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <main
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 0,
+          }}
+        >
           <TabBar
             tabs={s.tabs}
             activeId={active}
             onActivate={setActive}
             onClose={closeTab}
             onReconnect={s.reconnect}
-            onDuplicate={async (id) => { const nid = await s.duplicate(id); if (nid) setActive(nid); }}
+            onDuplicate={async (id) => {
+              const nid = await s.duplicate(id);
+              if (nid) setActive(nid);
+            }}
           />
           <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
-            <div style={{ ...pane, overflow: "auto", display: active === "editor" ? "block" : "none" }}>
+            <div
+              style={{
+                ...pane,
+                overflow: "auto",
+                display: active === "editor" ? "block" : "none",
+              }}
+            >
               {editing.kind === "folder" ? (
                 <FolderEditor node={editing.node} onSave={saveNode} />
               ) : (
-                <ConnectionEditor node={editing.node} onSave={saveNode} onConnect={openConn} />
+                <ConnectionEditor
+                  node={editing.node}
+                  onSave={saveNode}
+                  onConnect={openConn}
+                />
               )}
             </div>
             {s.tabs.map((t) => (
-              <div key={t.id} style={{ ...pane, display: active === t.id ? "block" : "none" }}>
+              <div
+                key={t.id}
+                style={{ ...pane, display: active === t.id ? "block" : "none" }}
+              >
                 <SessionView tab={t} onDead={() => s.markDead(t.id)} />
               </div>
             ))}
@@ -293,7 +350,10 @@ export default function App() {
         <Sep />
         <span>gateway 127.0.0.1 (local)</span>
         <Sep />
-        <span>{s.tabs.length} {s.tabs.length === 1 ? "open session" : "open sessions"}</span>
+        <span>
+          {s.tabs.length}{" "}
+          {s.tabs.length === 1 ? "open session" : "open sessions"}
+        </span>
       </footer>
     </div>
   );
@@ -305,7 +365,16 @@ function Sep() {
 
 function Center({ children }: { children: ReactNode }) {
   return (
-    <div style={{ height: "100vh", display: "grid", placeItems: "center", background: colors.bg, color: colors.dim, fontFamily: "system-ui, sans-serif" }}>
+    <div
+      style={{
+        height: "100vh",
+        display: "grid",
+        placeItems: "center",
+        background: colors.bg,
+        color: colors.dim,
+        fontFamily: "system-ui, sans-serif",
+      }}
+    >
       {children}
     </div>
   );
@@ -345,7 +414,13 @@ const banner: CSSProperties = {
   borderBottom: `1px solid ${colors.border}`,
   color: colors.text,
 };
-const sidebar: CSSProperties = { width: 320, borderRight: `1px solid ${colors.border}`, overflow: "hidden", display: "flex", flexDirection: "column" };
+const sidebar: CSSProperties = {
+  width: 320,
+  borderRight: `1px solid ${colors.border}`,
+  overflow: "hidden",
+  display: "flex",
+  flexDirection: "column",
+};
 const sidebarHead: CSSProperties = {
   padding: "8px 12px",
   fontSize: 11,

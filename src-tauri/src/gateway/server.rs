@@ -89,10 +89,11 @@ async fn rdp_handler(
 async fn bridge_raw_tcp(socket: WebSocket, spec: SessionSpec) {
     // Direto, ou tunelado por um jump host (SSH direct-tcpip) se a sessão tiver gateway.
     // `_jump` mantém o túnel vivo durante a sessão.
-    let (stream, _jump) = match crate::gateway::tunnel::connect_target(&spec.target, &spec.gateway).await {
-        Ok(x) => x,
-        Err(_) => return,
-    };
+    let (stream, _jump) =
+        match crate::gateway::tunnel::connect_target(&spec.target, &spec.gateway).await {
+            Ok(x) => x,
+            Err(_) => return,
+        };
     let (mut tcp_r, mut tcp_w) = tokio::io::split(stream);
     let (mut ws_tx, mut ws_rx) = socket.split();
 
@@ -159,9 +160,14 @@ mod tests {
         let port = start(reg.clone()).await;
 
         // Cliente WS
-        let url = format!("ws://127.0.0.1:{port}/session/{}?token={}", spec.id, spec.token);
+        let url = format!(
+            "ws://127.0.0.1:{port}/session/{}?token={}",
+            spec.id, spec.token
+        );
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        ws.send(TMessage::Binary(b"ola-mundo".to_vec())).await.unwrap();
+        ws.send(TMessage::Binary(b"ola-mundo".to_vec()))
+            .await
+            .unwrap();
         let got = ws.next().await.unwrap().unwrap();
         assert_eq!(got.into_data(), b"ola-mundo");
     }
@@ -197,7 +203,6 @@ mod tests {
             None,
             Some(key),
             None,
-            None,
         );
         let port = start(reg.clone()).await;
 
@@ -208,7 +213,8 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
         async fn wait_for(
-            ws: &mut (impl StreamExt<Item = Result<TMessage, tokio_tungstenite::tungstenite::Error>> + Unpin),
+            ws: &mut (impl StreamExt<Item = Result<TMessage, tokio_tungstenite::tungstenite::Error>>
+                      + Unpin),
             needle: &str,
         ) -> bool {
             let mut acc = String::new();
@@ -230,12 +236,26 @@ mod tests {
         }
 
         // `stty size` imprime "rows cols".
-        ws.send(TMessage::Binary(b"stty size\n".to_vec())).await.unwrap();
-        assert!(wait_for(&mut ws, "51 203").await, "PTY inicial devia ser 51x203");
+        ws.send(TMessage::Binary(b"stty size\n".to_vec()))
+            .await
+            .unwrap();
+        assert!(
+            wait_for(&mut ws, "51 203").await,
+            "PTY inicial devia ser 51x203"
+        );
 
         // Resize via mensagem de controlo (texto/JSON) → window_change.
-        ws.send(TMessage::Text("{\"type\":\"resize\",\"cols\":120,\"rows\":40}".into())).await.unwrap();
-        ws.send(TMessage::Binary(b"stty size\n".to_vec())).await.unwrap();
-        assert!(wait_for(&mut ws, "40 120").await, "após resize devia ser 40x120");
+        ws.send(TMessage::Text(
+            "{\"type\":\"resize\",\"cols\":120,\"rows\":40}".into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(TMessage::Binary(b"stty size\n".to_vec()))
+            .await
+            .unwrap();
+        assert!(
+            wait_for(&mut ws, "40 120").await,
+            "após resize devia ser 40x120"
+        );
     }
 }

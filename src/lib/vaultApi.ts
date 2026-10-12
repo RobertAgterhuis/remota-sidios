@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 // Tipos espelhando o modelo serde do backend Rust (src-tauri/src/model).
-export type Protocol = "ssh" | "rdp" | "vnc" | "telnet";
+export type Protocol = "ssh" | "rdp";
 
 export interface Credentials {
   username?: string;
@@ -19,19 +19,12 @@ export interface Gateway {
   key_path?: string;
 }
 
-/** Relay self-hosted (NAT traversal): liga ao destino via um agente atrás de NAT. */
-export interface Relay {
-  url: string; // wss://relay.privum.cloud
-  agent_id: string;
-}
-
 export interface Connection {
   protocol: Protocol;
   host: string;
   port?: number;
   credentials: Credentials;
   gateway?: Gateway;
-  relay?: Relay;
 }
 
 // Enum internamente-tageado (#[serde(tag = "type")]) do Rust.
@@ -58,16 +51,6 @@ export interface Document {
   trash: TrashEntry[];
 }
 
-/** What installing a new version costs the user: nothing, or an administrator password. */
-export type UpdateDelivery = "self_install" | "needs_admin";
-
-export interface UpdatePolicy {
-  delivery: UpdateDelivery;
-  enabled: boolean;
-  releasesUrl: string;
-  currentVersion: string;
-}
-
 // Wrappers tipados dos comandos Tauri (Tauri v2 converte snake_case→camelCase nos args).
 export const vaultApi = {
   exists: () => invoke<boolean>("vault_exists"),
@@ -80,12 +63,4 @@ export const vaultApi = {
   restoreNode: (id: string) => invoke<void>("restore_node", { id }),
   deleteForever: (id: string) => invoke<void>("delete_forever", { id }),
   emptyTrash: () => invoke<void>("empty_trash"),
-  importMremoteng: (path: string) =>
-    invoke<{ connections: number; message: string }>("import_mremoteng", { path }),
-  exportConnections: (path: string) =>
-    invoke<{ connections: number; message: string }>("export_connections", { path }),
-  importRemotaJson: (path: string) =>
-    invoke<{ connections: number; message: string }>("import_remota_json", { path }),
-  updatePolicy: () => invoke<UpdatePolicy>("update_policy"),
-  setUpdateCheck: (enabled: boolean) => invoke<boolean>("set_update_check", { enabled }),
 };

@@ -15,8 +15,11 @@ async fn main() {
         .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
         .parse::<SocketAddr>()
         .expect("REMOTA_LISTEN must be a socket address");
-    let ui_dir = PathBuf::from(env::var("REMOTA_UI_DIR").unwrap_or_else(|_| "/opt/remota/ui".to_owned()));
-    let listener = TcpListener::bind(address).await.expect("failed to bind Remota server");
+    let ui_dir =
+        PathBuf::from(env::var("REMOTA_UI_DIR").unwrap_or_else(|_| "/opt/remota/ui".to_owned()));
+    let listener = TcpListener::bind(address)
+        .await
+        .expect("failed to bind Remota server");
 
     info!(%address, ui_dir = %ui_dir.display(), "Remota server listening");
     axum::serve(listener, router(ui_dir))

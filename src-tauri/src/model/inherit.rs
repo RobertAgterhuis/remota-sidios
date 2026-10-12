@@ -22,7 +22,6 @@ pub fn resolve_effective(folder_chain: &[Credentials], conn: &Connection) -> Con
         port: conn.port,
         credentials: effective,
         gateway: conn.gateway.clone(),
-        relay: conn.relay.clone(),
     }
 }
 
@@ -62,7 +61,6 @@ mod tests {
             port: None,
             credentials: creds(Some("administrator"), None, None),
             gateway: None,
-            relay: None,
         };
         let eff = resolve_effective(&chain, &conn);
         assert_eq!(eff.credentials.username.as_deref(), Some("administrator"));
