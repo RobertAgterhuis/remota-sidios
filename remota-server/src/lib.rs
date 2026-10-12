@@ -13,6 +13,7 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 
 pub mod identity;
 pub mod model;
+pub mod policy;
 pub mod store;
 pub mod tree;
 pub mod webos;

@@ -41,11 +41,74 @@ pub struct NewCredential {
     pub passphrase: Option<String>,
 }
 
+/// What a session ticket covers, as Remota asks webOS to issue it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketRequest {
+    pub connection_id: String,
+    pub credential_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jump: Option<String>,
+    pub protocol: String,
+    pub target: String,
+}
+
+/// An opened credential, returned only when a ticket is consumed.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+pub struct OpenedCredential {
+    pub id: String,
+    pub kind: String,
+    pub username: Option<String>,
+    pub secret: String,
+    pub passphrase: Option<String>,
+}
+
+impl std::fmt::Debug for OpenedCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print a secret, even in a test failure or a log line.
+        f.debug_struct("OpenedCredential")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Grant {
+    pub connection_id: String,
+    pub protocol: String,
+    pub target: String,
+    pub jump: Option<String>,
+    pub credentials: Vec<OpenedCredential>,
+}
+
+/// One audit event; webOS checks the name and fields against an allowlist.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AuditEvent {
+    pub event: &'static str,
+    pub outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
 #[async_trait]
 pub trait Webos: Send + Sync {
     async fn list_credentials(&self, user: &str) -> WebosResult<Vec<CredentialSummary>>;
     async fn save_credential(&self, user: &str, credential: NewCredential) -> WebosResult<String>;
     async fn delete_credential(&self, user: &str, id: &str) -> WebosResult<()>;
+    /// The policy, or `None` while `known_revision` is current.
+    async fn policy(&self, known_revision: u64) -> WebosResult<Option<crate::policy::Policy>>;
+    async fn issue_ticket(&self, user: &str, request: TicketRequest) -> WebosResult<String>;
+    async fn consume_ticket(&self, user: &str, ticket: &str) -> WebosResult<Grant>;
+    /// The IDs of running sessions that must end; an error means "end them all".
+    async fn check_sessions(&self, sessions: &[(String, String)]) -> WebosResult<Vec<String>>;
+    /// Best effort: an audit failure never blocks or ends a session.
+    async fn audit(&self, user: &str, event: AuditEvent);
 }
 
 pub type SharedWebos = Arc<dyn Webos>;
@@ -135,6 +198,59 @@ impl Webos for HttpWebos {
             .await
             .map(|_| ())
     }
+    async fn policy(&self, known_revision: u64) -> WebosResult<Option<crate::policy::Policy>> {
+        let (status, body) = self
+            .post("policy", json!({ "knownRevision": known_revision }))
+            .await?;
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+        serde_json::from_value(body)
+            .map(Some)
+            .map_err(|_| WebosError::Unavailable)
+    }
+
+    async fn issue_ticket(&self, user: &str, request: TicketRequest) -> WebosResult<String> {
+        #[derive(Deserialize)]
+        struct Issued {
+            ticket: String,
+        }
+        let mut body = serde_json::to_value(request).map_err(|_| WebosError::Unavailable)?;
+        body["userId"] = json!(user);
+        let issued: Issued = self.post_as("tickets", body).await?;
+        Ok(issued.ticket)
+    }
+
+    async fn consume_ticket(&self, user: &str, ticket: &str) -> WebosResult<Grant> {
+        self.post_as(
+            "tickets/consume",
+            json!({ "userId": user, "ticket": ticket }),
+        )
+        .await
+    }
+
+    async fn check_sessions(&self, sessions: &[(String, String)]) -> WebosResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Ending {
+            end: Vec<String>,
+        }
+        let sessions: Vec<Value> = sessions
+            .iter()
+            .map(|(user, id)| json!({ "userId": user, "sessionId": id }))
+            .collect();
+        let ending: Ending = self
+            .post_as("sessions/check", json!({ "sessions": sessions }))
+            .await?;
+        Ok(ending.end)
+    }
+
+    async fn audit(&self, user: &str, event: AuditEvent) {
+        let Ok(mut body) = serde_json::to_value(event) else {
+            return;
+        };
+        body["userId"] = json!(user);
+        let _ = self.post("audit", body).await;
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +276,11 @@ pub mod fake {
     pub struct FakeWebos {
         pub credentials: Mutex<BTreeMap<String, StoredCredential>>,
         next: Mutex<u32>,
+        pub policy: Mutex<Option<crate::policy::Policy>>,
+        /// ticket → (user, request)
+        pub tickets: Mutex<BTreeMap<String, (String, TicketRequest)>>,
+        pub inactive: Mutex<Vec<String>>,
+        pub audits: Mutex<Vec<(String, AuditEvent)>>,
     }
 
     impl FakeWebos {
@@ -231,6 +352,79 @@ pub mod fake {
                     "not_found".into(),
                 )),
             }
+        }
+        async fn policy(&self, known_revision: u64) -> WebosResult<Option<crate::policy::Policy>> {
+            match self.policy.lock().unwrap().clone() {
+                Some(policy) if policy.revision == known_revision => Ok(None),
+                Some(policy) => Ok(Some(policy)),
+                None => Err(WebosError::Unavailable),
+            }
+        }
+
+        async fn issue_ticket(&self, user: &str, request: TicketRequest) -> WebosResult<String> {
+            let owned = request.credential_ids.iter().all(|id| {
+                self.credentials()
+                    .get(id)
+                    .is_some_and(|stored| stored.user == user)
+            });
+            if !owned {
+                return Err(WebosError::Refused(
+                    StatusCode::FORBIDDEN,
+                    "forbidden".into(),
+                ));
+            }
+            let ticket = format!("ticket-{}", uuid::Uuid::new_v4());
+            self.tickets
+                .lock()
+                .unwrap()
+                .insert(ticket.clone(), (user.to_owned(), request));
+            Ok(ticket)
+        }
+
+        async fn consume_ticket(&self, user: &str, ticket: &str) -> WebosResult<Grant> {
+            let mut tickets = self.tickets.lock().unwrap();
+            match tickets.get(ticket) {
+                Some((owner, _)) if owner == user => {}
+                _ => {
+                    return Err(WebosError::Refused(
+                        StatusCode::GONE,
+                        "ticket_invalid".into(),
+                    ))
+                }
+            }
+            let (_, request) = tickets.remove(ticket).expect("present");
+            let credentials = self.credentials();
+            Ok(Grant {
+                connection_id: request.connection_id,
+                protocol: request.protocol,
+                target: request.target,
+                jump: request.jump,
+                credentials: request
+                    .credential_ids
+                    .iter()
+                    .filter_map(|id| credentials.get(id))
+                    .map(|stored| OpenedCredential {
+                        id: stored.summary.id.clone(),
+                        kind: stored.summary.kind.clone(),
+                        username: stored.summary.username.clone(),
+                        secret: stored.secret.clone(),
+                        passphrase: stored.passphrase.clone(),
+                    })
+                    .collect(),
+            })
+        }
+
+        async fn check_sessions(&self, sessions: &[(String, String)]) -> WebosResult<Vec<String>> {
+            let inactive = self.inactive.lock().unwrap();
+            Ok(sessions
+                .iter()
+                .filter(|(user, _)| inactive.contains(user))
+                .map(|(_, id)| id.clone())
+                .collect())
+        }
+
+        async fn audit(&self, user: &str, event: AuditEvent) {
+            self.audits.lock().unwrap().push((user.to_owned(), event));
         }
     }
 }
