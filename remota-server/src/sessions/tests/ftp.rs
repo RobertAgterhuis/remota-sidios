@@ -130,7 +130,6 @@ impl FakeFtp {
                 return Ok(());
             }
             let line = line.trim_end().to_owned();
-            eprintln!("FTP< {line}");
             self.commands.lock().unwrap().push(line.clone());
             let (verb, arg) = line.split_once(' ').unwrap_or((line.as_str(), ""));
             let reply = match verb.to_ascii_uppercase().as_str() {
@@ -162,7 +161,9 @@ impl FakeFtp {
                 }
                 _ if !signed_in => "530 sign in first".into(),
                 "TYPE" | "NOOP" => "200 ok".into(),
-                "FEAT" if self.machine => "211-Features:\r\n MLST type*;size*;modify*;\r\n211 End".into(),
+                "FEAT" if self.machine => {
+                    "211-Features:\r\n MLST type*;size*;modify*;\r\n211 End".into()
+                }
                 "FEAT" => "211-Features:\r\n SIZE\r\n211 End".into(),
                 "PWD" => format!("257 \"{cwd}\" is the current folder"),
                 "CWD" => {
@@ -218,11 +219,13 @@ impl FakeFtp {
                 }
                 "STOR" => {
                     let path = resolve(&cwd, arg);
+                    // As real servers do: 150 first; FTPS clients start TLS on the data
+                    // connection only after it.
+                    control.write_all(b"150 send it\r\n").await?;
                     let Some(mut stream) = self.open_data(&mut data, protect).await else {
                         control.write_all(b"425 no data connection\r\n").await?;
                         continue;
                     };
-                    control.write_all(b"150 send it\r\n").await?;
                     let mut content = Vec::new();
                     let _ = stream.read_to_end(&mut content).await;
                     self.files.lock().unwrap().insert(path, content);
@@ -254,7 +257,10 @@ impl FakeFtp {
                 },
                 "RMD" => {
                     let path = resolve(&cwd, arg);
-                    self.folders.lock().unwrap().retain(|folder| folder != &path);
+                    self.folders
+                        .lock()
+                        .unwrap()
+                        .retain(|folder| folder != &path);
                     "250 removed".into()
                 }
                 _ => "502 not implemented".into(),
@@ -283,10 +289,10 @@ impl FakeFtp {
         protect: bool,
         content: Vec<u8>,
     ) -> std::io::Result<()> {
+        control.write_all(b"150 here it comes\r\n").await?;
         let Some(mut stream) = self.open_data(data, protect).await else {
             return control.write_all(b"425 no data connection\r\n").await;
         };
-        control.write_all(b"150 here it comes\r\n").await?;
         stream.write_all(&content).await?;
         stream.shutdown().await?;
         drop(stream);
@@ -294,7 +300,11 @@ impl FakeFtp {
     }
 
     fn listing(&self, cwd: &str, machine: bool) -> String {
-        let prefix = if cwd == "/" { "/".to_owned() } else { format!("{cwd}/") };
+        let prefix = if cwd == "/" {
+            "/".to_owned()
+        } else {
+            format!("{cwd}/")
+        };
         let child = |path: &str| {
             path.strip_prefix(&prefix)
                 .filter(|rest| !rest.is_empty() && !rest.contains('/'))
@@ -316,7 +326,10 @@ impl FakeFtp {
         for (path, content) in self.files.lock().unwrap().iter() {
             if let Some(name) = child(path) {
                 lines.push(if machine {
-                    format!("type=file;size={};modify=20261012100000; {name}", content.len())
+                    format!(
+                        "type=file;size={};modify=20261012100000; {name}",
+                        content.len()
+                    )
                 } else {
                     format!(
                         "-rw-r--r--    1 1000     1000     {:>8} Oct 12 10:00 {name}",
@@ -534,7 +547,10 @@ async fn browses_and_transfers_over_ftps_signed_in_with_the_stored_password_only
     h.add_ftp_connection(ADA, Protocol::Ftps, target).await;
 
     let start = h.start_ftp(ADA).await;
-    assert_eq!((start["protocol"].clone(), start["secure"].clone()), (json!("ftps"), json!(true)));
+    assert_eq!(
+        (start["protocol"].clone(), start["secure"].clone()),
+        (json!("ftps"), json!(true))
+    );
     let mut ftp = h.ftp_socket(ADA, &start).await;
     assert_eq!(ftp.ready().await["start"], "/");
 
@@ -574,15 +590,26 @@ async fn browses_and_transfers_over_ftps_signed_in_with_the_stored_password_only
         .call(json!({ "op": "rename", "from": "/hello world.txt", "to": "/docs/hello.txt" }))
         .await;
     assert_eq!(renamed["ok"], true, "{renamed}");
-    assert_eq!(ftp.names("/").await, [("docs".to_owned(), "dir".to_owned())]);
+    assert_eq!(
+        ftp.names("/").await,
+        [("docs".to_owned(), "dir".to_owned())]
+    );
     assert_eq!(
         ftp.names("/docs").await,
         [("hello.txt".to_owned(), "file".to_owned())]
     );
     let missing = ftp.call(json!({ "op": "list", "path": "/nowhere" })).await;
     assert_eq!(
-        (missing["ok"].clone(), missing["code"].clone(), missing["message"].clone()),
-        (json!(false), json!("server_error"), json!("No such folder"))
+        (
+            missing["ok"].clone(),
+            missing["code"].clone(),
+            missing["message"].clone()
+        ),
+        (
+            json!(false),
+            json!("server_error"),
+            json!("550 No such folder")
+        )
     );
     for (path, folder) in [("/docs/hello.txt", false), ("/docs", true)] {
         let deleted = ftp
@@ -671,7 +698,10 @@ async fn never_signs_in_to_a_changed_certificate() {
     h.add_ftp_connection(ADA, Protocol::Ftps, target).await;
 
     let (status, body) = h.start(ADA, json!({ "connectionId": "files" })).await;
-    assert_eq!((status, body["code"].clone()), (reqwest::StatusCode::CONFLICT, json!("certificate_unknown")));
+    assert_eq!(
+        (status, body["code"].clone()),
+        (reqwest::StatusCode::CONFLICT, json!("certificate_unknown"))
+    );
     let (status, _) = h
         .post(
             ADA,
@@ -679,17 +709,27 @@ async fn never_signs_in_to_a_changed_certificate() {
             json!({ "connectionId": "files", "fingerprint": "SHA256:other" }),
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "only the presented certificate is trusted");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "only the presented certificate is trusted"
+    );
     let start = h.start_ftp(ADA).await;
 
     // The certificate changes between the start and the session.
     *server.certificate.lock().unwrap() = certificate();
     let mut ftp = h.ftp_socket(ADA, &start).await;
     assert_eq!(ftp.close_code().await, Some(4409));
-    assert!(!server.saw("PASS"), "the password went to a changed certificate");
+    assert!(
+        !server.saw("PASS"),
+        "the password went to a changed certificate"
+    );
 
     let (status, body) = h.start(ADA, json!({ "connectionId": "files" })).await;
-    assert_eq!((status, body["code"].clone()), (reqwest::StatusCode::CONFLICT, json!("certificate_changed")));
+    assert_eq!(
+        (status, body["code"].clone()),
+        (reqwest::StatusCode::CONFLICT, json!("certificate_changed"))
+    );
     let (status, _) = h
         .post(
             ADA,
@@ -824,10 +864,16 @@ async fn refuses_ftp_through_a_jump_host() {
         .update(|doc| doc.upsert(None, node))
         .unwrap();
     let (status, body) = h
-        .start(ADA, json!({ "connectionId": "files", "oneTimeSecret": "x" }))
+        .start(
+            ADA,
+            json!({ "connectionId": "files", "oneTimeSecret": "x" }),
+        )
         .await;
     assert_eq!(
         (status, body["code"].clone()),
-        (reqwest::StatusCode::UNPROCESSABLE_ENTITY, json!("jump_unsupported"))
+        (
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            json!("jump_unsupported")
+        )
     );
 }

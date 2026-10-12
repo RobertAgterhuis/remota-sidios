@@ -125,12 +125,8 @@ async fn accept_certificate(
     let key = user.key.clone();
     let (host, port, fingerprint) = (effective.host.clone(), effective.port, presented);
     let stored = fingerprint.clone();
-    let trusted = blocking(move || {
-        store
-            .for_user(&key)
-            .trust(&host, port, protocol, &stored)
-    })
-    .await?;
+    let trusted =
+        blocking(move || store.for_user(&key).trust(&host, port, protocol, &stored)).await?;
     if !trusted {
         // A different certificate is already trusted for this target: never replaced silently.
         return Ok(certificate_answer("certificate_changed", &fingerprint));

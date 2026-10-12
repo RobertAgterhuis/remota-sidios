@@ -321,10 +321,25 @@ fn closing(code: u16, reason: &'static str) -> Message {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 enum Op {
-    List { id: u64, path: String },
-    Mkdir { id: u64, path: String },
-    Rename { id: u64, from: String, to: String },
-    Delete { id: u64, path: String, #[serde(default)] folder: bool },
+    List {
+        id: u64,
+        path: String,
+    },
+    Mkdir {
+        id: u64,
+        path: String,
+    },
+    Rename {
+        id: u64,
+        from: String,
+        to: String,
+    },
+    Delete {
+        id: u64,
+        path: String,
+        #[serde(default)]
+        folder: bool,
+    },
 }
 
 impl Op {
@@ -446,6 +461,20 @@ struct Download {
     transfer: Option<ftp::Transfer>,
     handle: Arc<Handle>,
     audit: Option<TransferAudit>,
+    /// Bytes still to send when the length was announced: the HTTP side stops reading after the
+    /// last one, so the transfer is completed (and audited) right there.
+    remaining: Option<u64>,
+}
+
+impl Download {
+    async fn complete(&mut self, transfer: ftp::Transfer) -> Result<(), FtpFail> {
+        let finished = ftp::finish(transfer).await;
+        let outcome = if finished.is_ok() { "done" } else { "failed" };
+        if let Some(audit) = self.audit.take() {
+            audit.finish(outcome).await;
+        }
+        finished
+    }
 }
 
 async fn download(
@@ -478,6 +507,7 @@ async fn download(
             event: "remota.ftp.download",
             outcome: None,
         }),
+        remaining: size,
     };
     let stream = futures_util::stream::unfold(state, |mut state| async move {
         let mut transfer = state.transfer.take()?;
@@ -487,21 +517,23 @@ async fn download(
             _ = state.handle.cancel.cancelled() => Err(std::io::ErrorKind::Interrupted.into()),
         };
         match read {
-            Ok(0) => {
-                let finished = ftp::finish(transfer).await;
-                let outcome = if finished.is_ok() { "done" } else { "failed" };
-                if let Some(audit) = state.audit.take() {
-                    audit.finish(outcome).await;
-                }
-                match finished {
-                    Ok(()) => None,
-                    Err(_) => Some((Err(std::io::Error::other("transfer failed")), state)),
-                }
-            }
+            Ok(0) => match state.complete(transfer).await {
+                Ok(()) => None,
+                Err(_) => Some((Err(std::io::Error::other("transfer failed")), state)),
+            },
             Ok(n) => {
                 state.handle.touch();
+                // A file that grew since `SIZE` is cut at the announced length.
+                let n = state
+                    .remaining
+                    .map_or(n, |remaining| n.min(remaining as usize));
                 buffer.truncate(n);
-                state.transfer = Some(transfer);
+                state.remaining = state.remaining.map(|remaining| remaining - n as u64);
+                if state.remaining == Some(0) {
+                    let _ = state.complete(transfer).await;
+                } else {
+                    state.transfer = Some(transfer);
+                }
                 Some((Ok(Bytes::from(buffer)), state))
             }
             Err(error) => Some((Err(error), state)),
@@ -543,10 +575,7 @@ async fn upload(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     if declared.is_some_and(|length| length > MAX_UPLOAD) {
-        handle
-            .audit
-            .send("remota.ftp.upload", "too_large")
-            .await;
+        handle.audit.send("remota.ftp.upload", "too_large").await;
         return Err(too_large());
     }
     handle.touch();

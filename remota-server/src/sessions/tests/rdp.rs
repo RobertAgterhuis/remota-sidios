@@ -179,7 +179,12 @@ impl Harness {
             .unwrap();
     }
 
-    pub(super) async fn post(&self, user: &str, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
+    pub(super) async fn post(
+        &self,
+        user: &str,
+        path: &str,
+        body: Value,
+    ) -> (reqwest::StatusCode, Value) {
         let response = self
             .http
             .post(format!("http://{}{path}", self.address))

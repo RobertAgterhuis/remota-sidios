@@ -48,15 +48,13 @@ fn upgrade_trust_protocols(connection: &Connection) -> rusqlite::Result<()> {
         "BEGIN;
          ALTER TABLE trust_records RENAME TO trust_records_old;",
     )?;
-    let rebuilt = connection
-        .execute_batch(SCHEMA)
-        .and_then(|()| {
-            connection.execute_batch(
-                "INSERT INTO trust_records SELECT * FROM trust_records_old;
+    let rebuilt = connection.execute_batch(SCHEMA).and_then(|()| {
+        connection.execute_batch(
+            "INSERT INTO trust_records SELECT * FROM trust_records_old;
                  DROP TABLE trust_records_old;
                  COMMIT;",
-            )
-        });
+        )
+    });
     if rebuilt.is_err() {
         let _ = connection.execute_batch("ROLLBACK;");
     }
@@ -260,7 +258,9 @@ mod tests {
             records.trusted("h", 22, Protocol::Ssh).unwrap().as_deref(),
             Some("SHA256:kept")
         );
-        assert!(records.trust("f", 21, Protocol::Ftps, "SHA256:new").unwrap());
+        assert!(records
+            .trust("f", 21, Protocol::Ftps, "SHA256:new")
+            .unwrap());
         // A second start leaves the upgraded table alone.
         let again = store.lock();
         upgrade_trust_protocols(&again).unwrap();

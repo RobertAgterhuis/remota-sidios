@@ -63,7 +63,9 @@ impl Target {
 #[derive(Debug, PartialEq, Eq)]
 pub enum FtpFail {
     /// The server presented another certificate than the trusted one.
-    CertificateChanged { presented: String },
+    CertificateChanged {
+        presented: String,
+    },
     /// The server does not offer TLS (FTPS) or the handshake failed.
     TlsFailed,
     /// The server refused the stored credential.
@@ -320,7 +322,11 @@ pub fn parse_listing(lines: &[String], machine: bool) -> Vec<Entry> {
             let line = line.trim_end_matches(['\r', '\n']);
             if machine {
                 // MLSD's "type=cdir" and "type=pdir" are the folder itself and its parent.
-                let facts = line.split(' ').next().unwrap_or_default().to_ascii_lowercase();
+                let facts = line
+                    .split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
                 if facts.contains("type=cdir;") || facts.contains("type=pdir;") {
                     return None;
                 }
@@ -401,7 +407,9 @@ impl Client {
             .await
             .map_err(|e| server_message(&e))?;
         let machine_listing = match stream.feat().await {
-            Ok(features) => features.keys().any(|name| name.eq_ignore_ascii_case("MLST")),
+            Ok(features) => features
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("MLST")),
             Err(_) => false,
         };
         let start = stream.pwd().await.unwrap_or_else(|_| "/".to_owned());
@@ -419,11 +427,7 @@ impl Client {
             .cwd(path)
             .await
             .map_err(|e| server_message(&e))?;
-        let here = self
-            .stream
-            .pwd()
-            .await
-            .unwrap_or_else(|_| path.to_owned());
+        let here = self.stream.pwd().await.unwrap_or_else(|_| path.to_owned());
         let lines = if self.machine_listing {
             self.stream.mlsd(None).await
         } else {
@@ -523,13 +527,19 @@ mod tests {
         assert_eq!(names, [("Backups", "dir"), ("notes.txt", "file")]);
         assert_eq!(entries[1].size, 12);
 
-        let dos = ["10-12-26  10:00AM       <DIR>          logs", "10-12-26  10:00AM                 5 a.cfg"]
-            .map(String::from);
+        let dos = [
+            "10-12-26  10:00AM       <DIR>          logs",
+            "10-12-26  10:00AM                 5 a.cfg",
+        ]
+        .map(String::from);
         let names: Vec<_> = parse_listing(&dos, false)
             .into_iter()
             .map(|e| (e.name, e.kind))
             .collect();
-        assert_eq!(names, [("logs".to_owned(), "dir"), ("a.cfg".to_owned(), "file")]);
+        assert_eq!(
+            names,
+            [("logs".to_owned(), "dir"), ("a.cfg".to_owned(), "file")]
+        );
 
         let machine = [
             "type=cdir;modify=20261012100000; /srv",
