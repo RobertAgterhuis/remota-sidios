@@ -17,6 +17,7 @@ pub mod importer;
 pub mod model;
 pub mod policy;
 pub mod rdp_inject;
+pub mod rdp_session;
 pub mod sessions;
 pub mod ssh;
 pub mod store;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub denies: Arc<Denies>,
     pub sessions: Sessions,
     pub about: Arc<about::About>,
+    /// The certificate the browser's RDP CredSSP binds to (generated per process).
+    pub gateway: Arc<rdp_inject::GatewayCertificate>,
 }
 
 impl AppState {
@@ -56,6 +59,10 @@ impl AppState {
             denies: Arc::new(denies),
             sessions: Sessions::default(),
             about: Arc::new(about::About::default()),
+            gateway: Arc::new(
+                rdp_inject::GatewayCertificate::generate()
+                    .expect("failed to create the RDP gateway certificate"),
+            ),
             store,
             webos,
         }
@@ -76,6 +83,7 @@ pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
         .merge(sessions::routes())
         .merge(transfer::routes())
         .merge(about::routes())
+        .merge(rdp_session::routes())
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

@@ -29,6 +29,8 @@ use crate::{
     identity::WebosUser,
     model::{Effective, Protocol},
     policy::{resolve_pinned, Refusal},
+    rdp_inject::{self, TargetLogin, ThrowawayLogin},
+    rdp_session::{self, RdpPlan},
     ssh::{self, Auth, Hop, Outcome, SshPlan},
     tree::{blocking, change, collect_garbage, ApiError, ApiResult},
     webos::{AuditEvent, Grant, NewCredential, SharedWebos, TicketRequest, WebosError},
@@ -60,6 +62,8 @@ struct PendingPlan {
     target: Endpoint,
     jump: Option<Endpoint>,
     one_time_password: Option<String>,
+    /// RDP only: the throwaway login, the trusted certificate, and the policy's RDP settings.
+    rdp: Option<RdpPlan>,
 }
 
 #[derive(Clone)]
@@ -192,8 +196,11 @@ async fn start(
         .await?
         .effective(&id)
         .ok_or(ApiError(StatusCode::NOT_FOUND, "not_found"))?;
-    if effective.protocol == Protocol::Rdp {
-        return Err(ApiError(StatusCode::NOT_IMPLEMENTED, "rdp_unavailable"));
+    if effective.protocol == Protocol::Rdp && effective.jump.is_some() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rdp_jump_unsupported",
+        ));
     }
     let effective = with_secret(&state, &user.key, &body, effective).await?;
     let plan = match plan(
@@ -224,8 +231,16 @@ async fn start(
             return Err(ApiError(status, code));
         }
     };
+    let mut plan = plan;
+    if plan.protocol == Protocol::Rdp {
+        match rdp_trust(&state, &user.key, &plan, effective.domain.clone()).await? {
+            Ok(rdp) => plan.rdp = Some(rdp),
+            Err(answer) => return Ok(answer),
+        }
+    }
     let ticket = issue(&state.webos, &user.key, &body.connection_id, &plan).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
+    let rdp_answer = plan.rdp.clone();
     state.sessions.pending.lock().expect("sessions").insert(
         session_id.clone(),
         Pending {
@@ -235,12 +250,54 @@ async fn start(
             plan,
         },
     );
-    let body = json!({
+    let mut body = json!({
         "sessionId": session_id,
-        "protocol": "ssh",
+        "protocol": effective.protocol.as_str(),
         "websocket": format!("/session/{session_id}?ticket={ticket}"),
     });
+    if let Some(rdp) = &rdp_answer {
+        body["rdpSessionLogin"] = json!({
+            "username": rdp.throwaway.username,
+            "password": rdp.throwaway.password.as_str(),
+        });
+        body["clipboard"] = json!(rdp.clipboard);
+    }
     Ok((StatusCode::CREATED, Json(body)).into_response())
+}
+
+/// Probes an RDP target and checks its certificate against the user's trust records. `Err` holds
+/// the answer that asks the user to decide on a first-seen or changed certificate.
+async fn rdp_trust(
+    state: &AppState,
+    user: &str,
+    plan: &PendingPlan,
+    domain: Option<String>,
+) -> ApiResult<Result<RdpPlan, Response>> {
+    let policy = state.policy.current().await.map_err(refusal)?;
+    let probe = rdp_inject::probe(plan.target.address, policy.allow_rdp_without_nla)
+        .await
+        .map_err(rdp_session::probe_error)?;
+    let store = state.store.clone();
+    let (key, host, port) = (user.to_owned(), plan.target.host.clone(), plan.target.port);
+    let trusted =
+        blocking(move || store.for_user(&key).trusted(&host, port, Protocol::Rdp)).await?;
+    match trusted {
+        None => Ok(Err(rdp_session::certificate_answer(
+            "certificate_unknown",
+            &probe.fingerprint,
+        ))),
+        Some(trusted) if trusted != probe.fingerprint => Ok(Err(rdp_session::certificate_answer(
+            "certificate_changed",
+            &probe.fingerprint,
+        ))),
+        Some(trusted) => Ok(Ok(RdpPlan {
+            throwaway: ThrowawayLogin::generate(),
+            fingerprint: trusted,
+            allow_without_nla: policy.allow_rdp_without_nla,
+            clipboard: policy.clipboard.rdp,
+            domain,
+        })),
+    }
 }
 
 /// Seals a password typed at connect time when the user asked to save it; otherwise a connection
@@ -330,6 +387,7 @@ async fn plan(
         },
         jump,
         one_time_password,
+        rdp: None,
     })
 }
 
@@ -384,6 +442,9 @@ async fn open(
         Ok(grant) => grant,
         Err(_) => return ApiError(StatusCode::UNAUTHORIZED, "ticket_invalid").into_response(),
     };
+    if pending.plan.protocol == Protocol::Rdp {
+        return open_rdp(state, user, id, pending, &grant, upgrade);
+    }
     let Some(plan) = ssh_plan(&pending.plan, &grant, query.cols, query.rows) else {
         return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
     };
@@ -419,6 +480,80 @@ async fn open(
         state
             .webos
             .audit(&user.key, audit("remota.session.end", result))
+            .await;
+    })
+}
+
+/// The RDP path of `open`: only a password signs in to RDP; the browser holds the throwaway login.
+fn open_rdp(
+    state: AppState,
+    user: WebosUser,
+    id: String,
+    pending: Pending,
+    grant: &Grant,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let plan = pending.plan;
+    let Some(rdp) = plan.rdp.clone() else {
+        return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
+    };
+    let released = plan
+        .target
+        .credential_id
+        .as_ref()
+        .and_then(|id| grant.credentials.iter().find(|c| &c.id == id));
+    let password = match released {
+        Some(c) if c.kind == "password" => c.secret.clone(),
+        Some(_) => {
+            return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "rdp_password_required")
+                .into_response()
+        }
+        None => match plan.one_time_password.clone() {
+            Some(password) => password,
+            None => {
+                return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response()
+            }
+        },
+    };
+    let login = TargetLogin {
+        username: plan.target.username.clone(),
+        domain: rdp.domain.clone(),
+        password: zeroize::Zeroizing::new(password),
+    };
+    let cancel = CancellationToken::new();
+    state.sessions.running.lock().expect("sessions").insert(
+        id.clone(),
+        Running {
+            user: user.key.clone(),
+            cancel: cancel.clone(),
+            protocol: plan.protocol,
+            host: plan.target.host.clone(),
+            port: plan.target.port,
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64),
+        },
+    );
+    let audit = audit_event(&plan);
+    upgrade.on_upgrade(move |socket| async move {
+        state
+            .webos
+            .audit(&user.key, audit("remota.session.start", "started"))
+            .await;
+        let outcome = rdp_session::run(
+            socket,
+            plan.target.address,
+            plan.target.host.clone(),
+            login,
+            rdp,
+            state.gateway.clone(),
+            cancel,
+        )
+        .await;
+        state.sessions.running.lock().expect("sessions").remove(&id);
+        state
+            .webos
+            .audit(&user.key, audit("remota.session.end", outcome.audit()))
             .await;
     })
 }
@@ -616,6 +751,8 @@ mod tests {
     use serde_json::{json, Value};
     use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 
+    mod rdp;
+
     use super::*;
     use crate::{
         model::{Connection, Credentials, Node, Protocol},
@@ -746,7 +883,7 @@ mod tests {
         vec![Rule {
             cidr: "127.0.0.0/8".into(),
             ports: "1-65535".into(),
-            protocols: vec![Protocol::Ssh],
+            protocols: vec![Protocol::Ssh, Protocol::Rdp],
         }]
     }
 
@@ -760,8 +897,12 @@ mod tests {
     impl Harness {
         /// Remota on a free port; loopback allowed by policy and not denied (tests only).
         async fn new() -> Self {
+            Self::with_policy(policy(allow_loopback(), 5)).await
+        }
+
+        async fn with_policy(policy: Policy) -> Self {
             let webos = Arc::new(FakeWebos::default());
-            *webos.policy.lock().unwrap() = Some(policy(allow_loopback(), 5));
+            *webos.policy.lock().unwrap() = Some(policy);
             let state = AppState::with_denies(
                 Store::open_in_memory().unwrap(),
                 webos.clone(),

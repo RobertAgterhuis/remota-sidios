@@ -255,6 +255,8 @@ async fn session(
                 throwaway: &gateway_login,
                 gateway: &gateway,
                 trusted_fingerprint: trusted.as_deref(),
+                allow_without_nla: false,
+                clipboard: true,
             },
         )
         .await?;
@@ -377,6 +379,8 @@ async fn refuses_a_browser_stream_that_is_not_rdcleanpath() {
             throwaway: &throwaway,
             gateway: &gateway,
             trusted_fingerprint: None,
+            allow_without_nla: false,
+            clipboard: true,
         },
     )
     .await;
@@ -495,4 +499,46 @@ async fn refuses_a_wrong_target_credential() {
     let (gateway, browser, _) = session(&fixture, login.clone(), login, None).await;
     assert_eq!(gateway.err(), Some(InjectError::TargetRefused));
     assert!(browser.is_err());
+}
+
+/// A client network block (CS_NET) with the given static channels, between other GCC blocks.
+fn connect_initial_with(channels: &[&str]) -> Vec<u8> {
+    let mut pdu = vec![0x03, 0x00, 0x01, 0x2c, 0x02, 0xf0, 0x80, 0x7f, 0x65];
+    // CS_SECURITY (0xC002), 12 bytes.
+    pdu.extend_from_slice(&[0x02, 0xc0, 0x0c, 0x00, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let length = 8 + 12 * channels.len();
+    pdu.extend_from_slice(&0xC003u16.to_le_bytes());
+    pdu.extend_from_slice(&(length as u16).to_le_bytes());
+    pdu.extend_from_slice(&(channels.len() as u32).to_le_bytes());
+    for name in channels {
+        let mut field = [0u8; 8];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        pdu.extend_from_slice(&field);
+        pdu.extend_from_slice(&0x8080_0000u32.to_le_bytes());
+    }
+    // CS_CLUSTER (0xC004) after it.
+    pdu.extend_from_slice(&[0x04, 0xc0, 0x0c, 0x00, 0x0d, 0, 0, 0, 0, 0, 0, 0]);
+    pdu
+}
+
+#[test]
+fn closes_only_the_clipboard_channel_and_keeps_the_pdu_size() {
+    let pdu = connect_initial_with(&["rdpdr", "cliprdr", "drdynvc"]);
+    let filtered = without_clipboard_channel(&pdu).unwrap();
+    assert_eq!(filtered.len(), pdu.len());
+    assert!(!contains(&filtered, b"cliprdr"));
+    assert!(contains(&filtered, b"remnocb\0"));
+    assert!(contains(&filtered, b"rdpdr\0"));
+    assert!(contains(&filtered, b"drdynvc\0"));
+    // Only the 7 name bytes changed.
+    let changed = pdu.iter().zip(&filtered).filter(|(a, b)| a != b).count();
+    assert!(changed <= 7);
+}
+
+#[test]
+fn leaves_a_connect_initial_without_the_clipboard_channel_alone() {
+    let pdu = connect_initial_with(&["rdpdr", "drdynvc"]);
+    assert_eq!(without_clipboard_channel(&pdu).unwrap(), pdu);
+    let none = connect_initial_with(&[]);
+    assert_eq!(without_clipboard_channel(&none).unwrap(), none);
 }

@@ -198,7 +198,7 @@ fn tls_connector() -> TlsConnector {
 }
 
 /// Reads one TPKT-framed X.224 PDU.
-async fn read_tpkt(stream: &mut TcpStream) -> Result<Vec<u8>, InjectError> {
+pub(crate) async fn read_tpkt(stream: &mut TcpStream) -> Result<Vec<u8>, InjectError> {
     let mut header = [0u8; 4];
     stream
         .read_exact(&mut header)
@@ -217,7 +217,7 @@ async fn read_tpkt(stream: &mut TcpStream) -> Result<Vec<u8>, InjectError> {
     Ok(pdu)
 }
 
-fn selected_protocol(confirm: &[u8]) -> Result<SecurityProtocol, InjectError> {
+pub(crate) fn selected_protocol(confirm: &[u8]) -> Result<SecurityProtocol, InjectError> {
     let decoded: ironrdp_pdu::x224::X224<ConnectionConfirm> =
         ironrdp_core::decode(confirm).map_err(|_| InjectError::TargetUnreachable)?;
     match decoded.0 {
@@ -232,6 +232,8 @@ pub struct TargetLeg {
     pub x224_confirm: Vec<u8>,
     pub protocol: SecurityProtocol,
     pub fingerprint: String,
+    /// False only when the policy allows RDP without NLA and the target does not offer it.
+    pub nla: bool,
 }
 
 /// Connects to the target, checks its certificate against `trusted` (if any), and signs in with
@@ -242,7 +244,40 @@ pub async fn open_target(
     x224_request: &[u8],
     login: &TargetLogin,
     trusted: Option<&str>,
+    allow_without_nla: bool,
 ) -> Result<TargetLeg, InjectError> {
+    let (tls, x224_confirm, protocol, certificate) =
+        negotiate(address, x224_request, allow_without_nla).await?;
+    let presented = fingerprint(&certificate);
+    if trusted.is_some_and(|trusted| trusted != presented) {
+        return Err(InjectError::CertificateChanged { presented });
+    }
+    let nla = uses_nla(protocol);
+    let mut framed = TokioFramed::new(tls);
+    if nla {
+        let public_key = public_key_of(&certificate).ok_or(InjectError::TargetUnreachable)?;
+        target_credssp(&mut framed, login, server_name, protocol, public_key).await?;
+    }
+    Ok(TargetLeg {
+        framed,
+        x224_confirm,
+        protocol,
+        fingerprint: presented,
+        nla,
+    })
+}
+
+fn uses_nla(protocol: SecurityProtocol) -> bool {
+    protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX)
+}
+
+/// X.224 negotiation and the TLS upgrade: the TLS stream, the X.224 confirmation, the selected
+/// protocol, and the target's certificate.
+async fn negotiate(
+    address: SocketAddr,
+    x224_request: &[u8],
+    allow_without_nla: bool,
+) -> Result<(TlsStream<TcpStream>, Vec<u8>, SecurityProtocol, Vec<u8>), InjectError> {
     let mut tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
         .await
         .map_err(|_| InjectError::TargetUnreachable)?
@@ -252,14 +287,15 @@ pub async fn open_target(
         .map_err(|_| InjectError::TargetUnreachable)?;
     let x224_confirm = read_tpkt(&mut tcp).await?;
     let protocol = selected_protocol(&x224_confirm)?;
-    if !protocol.intersects(SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX) {
+    // Without NLA the target shows its own sign-in screen; nothing is injected. Standard RDP
+    // security (no TLS) is never accepted.
+    if !uses_nla(protocol) && !(allow_without_nla && protocol.contains(SecurityProtocol::SSL)) {
         return Err(InjectError::NlaNotOffered);
     }
-
     let tls_name = TlsName::try_from("remota-target").expect("static name");
-    let tls = tls_connector()
-        .connect(tls_name, tcp)
+    let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, tls_connector().connect(tls_name, tcp))
         .await
+        .map_err(|_| InjectError::TargetUnreachable)?
         .map_err(|_| InjectError::TargetUnreachable)?;
     let certificate = tls
         .get_ref()
@@ -268,23 +304,39 @@ pub async fn open_target(
         .and_then(|chain| chain.first())
         .map(|cert| cert.as_ref().to_vec())
         .ok_or(InjectError::TargetUnreachable)?;
-    let presented = fingerprint(&certificate);
-    if trusted.is_some_and(|trusted| trusted != presented) {
-        return Err(InjectError::CertificateChanged { presented });
-    }
-    let public_key = public_key_of(&certificate).ok_or(InjectError::TargetUnreachable)?;
+    Ok((tls, x224_confirm, protocol, certificate))
+}
 
-    let mut framed = TokioFramed::new(tls);
-    target_credssp(&mut framed, login, server_name, protocol, public_key).await?;
-    Ok(TargetLeg {
-        framed,
-        x224_confirm,
+/// What a target presents before any credential is sent: for the user's trust decision.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Probe {
+    pub fingerprint: String,
+    pub nla: bool,
+}
+
+/// Connects, negotiates TLS (offering NLA, and plain TLS only when allowed), reads the
+/// certificate, and disconnects. No credential is involved.
+pub async fn probe(address: SocketAddr, allow_without_nla: bool) -> Result<Probe, InjectError> {
+    use ironrdp_pdu::nego::{ConnectionRequest, RequestFlags};
+    let mut protocol = SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX;
+    if allow_without_nla {
+        protocol |= SecurityProtocol::SSL;
+    }
+    let request = ironrdp_pdu::x224::X224(ConnectionRequest {
+        nego_data: None,
+        flags: RequestFlags::empty(),
         protocol,
-        fingerprint: presented,
+    });
+    let bytes = ironrdp_core::encode_vec(&request).map_err(|_| InjectError::BadRequest)?;
+    let (mut tls, _, selected, certificate) = negotiate(address, &bytes, allow_without_nla).await?;
+    let _ = tls.shutdown().await;
+    Ok(Probe {
+        fingerprint: fingerprint(&certificate),
+        nla: uses_nla(selected),
     })
 }
 
-async fn target_credssp<S>(
+pub(crate) async fn target_credssp<S>(
     framed: &mut ironrdp_async::Framed<S>,
     login: &TargetLogin,
     server_name: &str,
@@ -344,7 +396,7 @@ where
 }
 
 /// CredSSP toward the browser as a server: only the throwaway login is accepted.
-async fn client_credssp<S>(
+pub(crate) async fn client_credssp<S>(
     framed: &mut ironrdp_async::Framed<S>,
     throwaway: &ThrowawayLogin,
     gateway: &GatewayCertificate,
@@ -469,6 +521,10 @@ pub struct Injection<'a> {
     pub throwaway: &'a ThrowawayLogin,
     pub gateway: &'a GatewayCertificate,
     pub trusted_fingerprint: Option<&'a str>,
+    /// The administrator allows targets without Network Level Authentication.
+    pub allow_without_nla: bool,
+    /// The administrator allows the RDP clipboard; otherwise the clipboard channel is not opened.
+    pub clipboard: bool,
 }
 
 /// A started session: the certificate fingerprint to remember, and both legs ready to relay.
@@ -490,6 +546,7 @@ where
         &x224_request,
         plan.login,
         plan.trusted_fingerprint,
+        plan.allow_without_nla,
     )
     .await
     {
@@ -513,12 +570,62 @@ where
         .await
         .map_err(|_| InjectError::ClientGone)?;
     let mut framed = TokioFramed::new(client);
-    client_credssp(&mut framed, plan.throwaway, plan.gateway, leg.protocol).await?;
+    if leg.nla {
+        client_credssp(&mut framed, plan.throwaway, plan.gateway, leg.protocol).await?;
+    }
+    let mut target = leg.framed;
+    if !plan.clipboard {
+        // The browser's first PDU after the security exchange is its MCS Connect Initial, which
+        // names the static channels to open.
+        let (_, connect_initial) = tokio::time::timeout(HANDSHAKE_TIMEOUT, framed.read_pdu())
+            .await
+            .map_err(|_| InjectError::ClientGone)?
+            .map_err(|_| InjectError::ClientGone)?;
+        let filtered =
+            without_clipboard_channel(&connect_initial).ok_or(InjectError::BadRequest)?;
+        target
+            .write_all(&filtered)
+            .await
+            .map_err(|_| InjectError::TargetUnreachable)?;
+    }
     Ok(Established {
         fingerprint: leg.fingerprint,
         client: framed,
-        target: leg.framed,
+        target,
     })
+}
+
+const CS_NET: u16 = 0xC003;
+const CLIPBOARD_CHANNEL: &[u8; 7] = b"cliprdr";
+/// Same length as `cliprdr`, so no length in the PDU changes; no RDP server knows this channel.
+const CLOSED_CHANNEL: &[u8; 7] = b"remnocb";
+
+/// Renames the clipboard channel in an MCS Connect Initial so the target never opens it. Names are
+/// fixed 8-byte fields, so the PDU keeps its size. `None` when the network block is malformed.
+pub fn without_clipboard_channel(pdu: &[u8]) -> Option<Vec<u8>> {
+    let mut out = pdu.to_vec();
+    let mut at = 0;
+    while at + 8 <= out.len() {
+        let kind = u16::from_le_bytes([out[at], out[at + 1]]);
+        let length = usize::from(u16::from_le_bytes([out[at + 2], out[at + 3]]));
+        if kind == CS_NET && length >= 8 && at + length <= out.len() {
+            let count = u32::from_le_bytes(out[at + 4..at + 8].try_into().ok()?) as usize;
+            if length == 8 + 12 * count && count <= 31 {
+                for index in 0..count {
+                    let name = at + 8 + 12 * index;
+                    if out[name..name + 7].eq_ignore_ascii_case(CLIPBOARD_CHANNEL)
+                        && out[name + 7] == 0
+                    {
+                        out[name..name + 7].copy_from_slice(CLOSED_CHANNEL);
+                    }
+                }
+                return Some(out);
+            }
+        }
+        at += 1;
+    }
+    // No network block: the client asked for no channels at all.
+    Some(out)
 }
 
 /// Relays both legs until either side closes.
