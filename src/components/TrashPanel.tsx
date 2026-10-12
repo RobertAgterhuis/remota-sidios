@@ -16,9 +16,16 @@ export function TrashPanel({ trash, onRestore, onDeleteForever, onEmpty }: Props
 
   return (
     <div style={{ borderTop: `1px solid ${colors.border}`, marginTop: "auto" }}>
-      <div onClick={() => setOpen((o) => !o)} style={header}>
-        <span style={{ width: 12, fontSize: 10 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ flex: 1 }}>🗑️ Trash ({trash.length})</span>
+      <div style={header}>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          style={{ ...toggleBtn, flex: 1 }}
+        >
+          <span aria-hidden style={{ width: 12, fontSize: 10 }}>{open ? "▾" : "▸"}</span>
+          <span>🗑️ Trash ({trash.length})</span>
+        </button>
         {open && (
           <button type="button" onClick={(e) => { e.stopPropagation(); onEmpty(); }} style={emptyBtn} title="Permanently delete everything in the trash">
             Empty
@@ -32,8 +39,8 @@ export function TrashPanel({ trash, onRestore, onDeleteForever, onEmpty }: Props
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                 {e.node.type === "folder" ? (e.node.icon ?? "📁") : "🔌"} {e.node.name}
               </span>
-              <button type="button" onClick={() => onRestore(e.node.id)} style={iconBtn} title="Restore">↩</button>
-              <button type="button" onClick={() => onDeleteForever(e.node.id)} style={{ ...iconBtn, fontSize: 15 }} title="Delete forever">×</button>
+              <button type="button" aria-label={`Restore ${e.node.name}`} onClick={() => onRestore(e.node.id)} style={iconBtn} title="Restore">↩</button>
+              <button type="button" aria-label={`Delete ${e.node.name} forever`} onClick={() => onDeleteForever(e.node.id)} style={{ ...iconBtn, fontSize: 15 }} title="Delete forever">×</button>
             </div>
           ))}
         </div>
@@ -80,4 +87,17 @@ const iconBtn: CSSProperties = {
   fontSize: 13,
   lineHeight: 1,
   padding: "0 2px",
+};
+
+const toggleBtn: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  background: "transparent",
+  border: "none",
+  color: "inherit",
+  font: "inherit",
+  padding: 0,
+  textAlign: "left",
+  cursor: "pointer",
 };
