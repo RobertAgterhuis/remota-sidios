@@ -11,6 +11,8 @@ export interface SessionStart {
   rdpSessionLogin?: { username: string; password: string };
   /** RDP only: whether the administrator allows the clipboard. */
   clipboard?: boolean;
+  /** FTP only: true for FTPS. */
+  secure?: boolean;
 }
 
 /** An RDP certificate the user must decide on before the session can start. */

@@ -7,6 +7,7 @@ import {
 } from "../state/useSessions";
 import { SshView } from "../renderers/SshView";
 import { RdpView } from "../renderers/RdpView";
+import { FtpView } from "../renderers/FtpView";
 import { colors, ghostBtn, input, primaryBtn } from "./styles";
 
 export function SessionView({
@@ -62,6 +63,17 @@ export function SessionView({
       <SshView key={tab.epoch} wsUrl={socketUrl(tab.start)} onClosed={onDead} />
     );
   }
+  if (tab.protocol === "ftp" || tab.protocol === "ftps") {
+    return (
+      <FtpView
+        key={tab.epoch}
+        wsUrl={socketUrl(tab.start)}
+        sessionId={tab.start.sessionId}
+        secure={tab.start.secure === true}
+        onClosed={onDead}
+      />
+    );
+  }
   return (
     <RdpView
       key={tab.epoch}
@@ -74,7 +86,7 @@ export function SessionView({
 }
 
 /**
- * An RDP server's certificate, decided like an SSH host key: a first-seen one is trusted after
+ * An RDP or FTPS server's certificate, decided like an SSH host key: a first-seen one is trusted after
  * the user compares its fingerprint; a changed one is never accepted in one step.
  */
 function CertificatePrompt({

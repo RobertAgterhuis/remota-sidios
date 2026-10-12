@@ -2,7 +2,7 @@
 // upstream's Tauri commands. SidiOS's gateway identifies the user on every request, so there is no
 // sign-in or vault password here. Secrets are write-only: the editors may send `password`,
 // `private_key`, and `passphrase`; the server seals them and answers only `credential_id`.
-export type Protocol = "ssh" | "rdp" | "https";
+export type Protocol = "ssh" | "rdp" | "https" | "ftp" | "ftps";
 
 export interface SecretFields {
   /** A sealed credential on the server; never its value. */
@@ -95,6 +95,13 @@ const messages: Record<string, string> = {
   no_username: "Set a username on the connection or its folder first.",
   not_found: "It is no longer there.",
   policy_unavailable: "SidiOS could not check the connection policy. Try again in a moment.",
+  connection_closed: "The connection to the server was lost. Reconnect to continue.",
+  ftp_password_required: "FTP signs in with a password. Save a password for this connection.",
+  invalid_command: "That action could not be sent. Try again.",
+  invalid_path: "That name or path cannot be used.",
+  jump_unsupported: "Only SSH connections can go through a jump host. Remove the jump host.",
+  server_error: "The server refused that action.",
+  tls_unavailable: "The server did not accept an FTPS (TLS) connection. Check the port, or whether it offers FTPS.",
   rdp_jump_unsupported: "RDP connections cannot go through a jump host. Remove the jump host.",
   rdp_password_required: "RDP signs in with a password. Save a password for this connection.",
   target_unreachable: "The server could not be reached.",
@@ -160,7 +167,7 @@ export const treeApi = {
     request<Document>("DELETE", `/api/trash/${segment(id)}`),
   emptyTrash: () => request<Document>("DELETE", "/api/trash"),
   trustCertificate: (connectionId: string, fingerprint: string) =>
-    request<{ trusted: boolean }>("POST", "/api/trust/rdp", {
+    request<{ trusted: boolean }>("POST", "/api/trust/certificate", {
       connectionId,
       fingerprint,
     }),

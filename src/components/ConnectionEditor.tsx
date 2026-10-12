@@ -18,8 +18,8 @@ import {
 } from "./SecretField";
 import { colors, input, label, primaryBtn } from "./styles";
 
-const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https"];
-const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, https: 443 };
+const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https", "ftp", "ftps"];
+const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, https: 443, ftp: 21, ftps: 21 };
 
 type Props = {
   node: Node | null;
@@ -87,6 +87,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
   const isRdp = protocol === "rdp";
   // HTTPS connections open in the SidiOS Browser and use no Remota credential.
   const isWeb = protocol === "https";
+  const isFtp = protocol === "ftp" || protocol === "ftps";
   const inheritedGw = inherited.gateway
     ? `${inherited.gateway.value.host} (from ${inherited.gateway.from})`
     : undefined;
@@ -138,6 +139,17 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
         </p>
       )}
 
+      {protocol === "ftp" && (
+        <p role="note" style={{ margin: 0, fontSize: 12, color: colors.danger }}>
+          Plain FTP sends the password and files to the server unencrypted. Use FTPS when the server offers it.
+        </p>
+      )}
+      {protocol === "ftps" && (
+        <p style={{ margin: 0, fontSize: 12, color: colors.dim }}>
+          FTPS uses TLS on the control and data connections: explicit (AUTH TLS) on any port, implicit on port 990.
+        </p>
+      )}
+
       {!isWeb && (
       <fieldset style={{ border: "none", borderTop: `1px solid ${colors.border}`, padding: "12px 0 0", margin: 0 }}>
         <legend style={{ ...label, padding: 0, marginBottom: 8 }}>
@@ -153,7 +165,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
           />
           <SecretField
             prefix="Connection"
-            allowKey={!isRdp}
+            allowKey={!isRdp && !isFtp}
             value={secret}
             onChange={setSecret}
             inheritedFrom={inherited.secret?.from}
@@ -171,7 +183,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
       </fieldset>
       )}
 
-      {!isRdp && !isWeb && <GatewaySection value={gw} onChange={setGw} inheritedFrom={inheritedGw} />}
+      {!isRdp && !isWeb && !isFtp && <GatewaySection value={gw} onChange={setGw} inheritedFrom={inheritedGw} />}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button type="submit" disabled={busy || !name.trim() || !host.trim()} style={{ ...primaryBtn, opacity: busy || !name.trim() || !host.trim() ? 0.6 : 1 }}>
