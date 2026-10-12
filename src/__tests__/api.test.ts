@@ -51,10 +51,11 @@ describe("tree API client", () => {
 });
 
 describe("session messages", () => {
-  it("explains policy and limit refusals", async () => {
+  it("explains blocked targets and limit refusals", async () => {
     mockFetch(403, { code: "target_not_allowed" });
     await expect(treeApi.forgetHostKey("web")).rejects.toMatchObject({
-      message: "This address is not allowed by your administrator.",
+      message:
+        "This address cannot be reached from Remota: SidiOS's own networks, the SidiOS host, and loopback or link-local addresses are blocked.",
     });
     mockFetch(429, { code: "session_limit" });
     await expect(treeApi.forgetHostKey("web")).rejects.toMatchObject({
