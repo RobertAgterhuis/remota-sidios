@@ -19,6 +19,7 @@ import { ancestors, chainFor, inheritedValues } from "./lib/inherit";
 import type { Node } from "./lib/api";
 import { colors } from "./components/styles";
 import { downloadFile } from "./lib/browserFiles";
+import { httpsUrl, openInSidiosBrowser } from "./lib/shell";
 import { ImportDialog, type ImportKind } from "./components/ImportDialog";
 import { AboutDialog } from "./components/AboutDialog";
 
@@ -116,6 +117,13 @@ export default function App() {
     // The server resolves inheritance, checks the policy, and issues a single-use ticket.
     const found = findConnWithChain(v.tree, id);
     if (!found) return;
+    if (found.node.conn.protocol === "https") {
+      const { host, port } = found.node.conn;
+      setNotice(`Opening ${found.node.name} in the SidiOS Browser…`);
+      const result = await openInSidiosBrowser(httpsUrl(host, port));
+      setNotice(result.ok ? `${found.node.name} opened in the SidiOS Browser.` : browserMessage(result.code));
+      return;
+    }
     const newId = await s.openSession({
       connId: id,
       title: found.node.name,
@@ -427,3 +435,16 @@ const statusbar: CSSProperties = {
   color: colors.dim,
   fontSize: 12,
 };
+
+function browserMessage(code: string): string {
+  switch (code) {
+    case "tool_unavailable":
+      return "The SidiOS Browser is not available. Ask your administrator to turn it on.";
+    case "invalid_url":
+      return "This address cannot be opened in the SidiOS Browser.";
+    case "no_shell":
+      return "Open Remota from the SidiOS desktop to use HTTPS connections.";
+    default:
+      return "The SidiOS Browser could not open this address. Try again.";
+  }
+}

@@ -360,6 +360,8 @@ impl Walk<'_> {
         let protocol = match raw_protocol.to_ascii_uppercase().as_str() {
             "RDP" => Protocol::Rdp,
             "SSH1" | "SSH2" | "SSH" => Protocol::Ssh,
+            // Opened in the SidiOS Browser (US7); plain HTTP stays skipped.
+            "HTTPS" => Protocol::Https,
             _ => {
                 let detail = raw_protocol
                     .chars()
@@ -585,6 +587,25 @@ mod tests {
                 ("router", "protocol_not_supported")
             ]
         );
+    }
+
+    #[test]
+    fn imports_https_connections_and_still_skips_plain_http() {
+        let xml = r#"<Connections ConfVersion="2.5">
+  <Node Name="router" Type="Connection" Protocol="HTTPS" Hostname="10.0.0.1" Port="8443" />
+  <Node Name="old" Type="Connection" Protocol="HTTP" Hostname="10.0.0.2" Port="80" />
+</Connections>"#;
+        let imported = parse_mremoteng(xml, "f", None).unwrap();
+        let Node::Folder { children, .. } = &imported.root else {
+            panic!("root is a folder");
+        };
+        let Node::Connection { conn, .. } = &children[0] else {
+            panic!("router is a connection");
+        };
+        assert_eq!((conn.protocol, conn.port), (Protocol::Https, Some(8443)));
+        assert_eq!(children.len(), 1);
+        assert_eq!(imported.report.skipped[0].name, "old");
+        assert_eq!(imported.report.skipped[0].reason, "protocol_not_supported");
     }
 
     #[test]

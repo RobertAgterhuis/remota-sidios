@@ -676,3 +676,33 @@ fn the_probe_needs_no_credential() {
     // `probe` takes only an address and the NLA setting: nothing secret can reach the target.
     let _: fn(SocketAddr, bool) -> _ = rdp_inject::probe;
 }
+
+#[tokio::test]
+async fn starts_no_session_for_an_https_connection() {
+    let h = Harness::new().await;
+    let node = Node::Connection {
+        id: "web".into(),
+        name: "router".into(),
+        conn: Connection {
+            protocol: Protocol::Https,
+            host: "10.0.0.1".into(),
+            port: Some(8443),
+            credentials: Credentials::default(),
+            gateway: None,
+        },
+    };
+    h.state
+        .store
+        .for_user(ADA)
+        .update(|doc| doc.upsert(None, node))
+        .unwrap();
+    let (status, body) = h.start(ADA, json!({ "connectionId": "web" })).await;
+    assert_eq!(
+        (status, body["code"].clone()),
+        (
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            json!("open_in_browser")
+        )
+    );
+    assert!(h.webos.tickets.lock().unwrap().is_empty());
+}

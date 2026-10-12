@@ -16,6 +16,12 @@ pub const MAX_NAME: usize = 120;
 pub enum Protocol {
     Ssh,
     Rdp,
+    /// A web console, opened in the SidiOS Browser; Remota starts no session for it (US7).
+    Https,
+    /// Plain FTP: the server signs in with the stored password, sent unencrypted to the target (US8).
+    Ftp,
+    /// FTP over TLS: explicit (AUTH TLS) on any port, implicit on 990 (US8).
+    Ftps,
 }
 
 impl Protocol {
@@ -23,6 +29,9 @@ impl Protocol {
         match self {
             Self::Ssh => "ssh",
             Self::Rdp => "rdp",
+            Self::Https => "https",
+            Self::Ftp => "ftp",
+            Self::Ftps => "ftps",
         }
     }
 
@@ -30,7 +39,13 @@ impl Protocol {
         match self {
             Self::Ssh => 22,
             Self::Rdp => 3389,
+            Self::Https => 443,
+            Self::Ftp | Self::Ftps => 21,
         }
+    }
+
+    pub fn is_file_transfer(self) -> bool {
+        matches!(self, Self::Ftp | Self::Ftps)
     }
 }
 

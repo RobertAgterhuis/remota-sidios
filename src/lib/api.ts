@@ -2,7 +2,7 @@
 // upstream's Tauri commands. SidiOS's gateway identifies the user on every request, so there is no
 // sign-in or vault password here. Secrets are write-only: the editors may send `password`,
 // `private_key`, and `passphrase`; the server seals them and answers only `credential_id`.
-export type Protocol = "ssh" | "rdp";
+export type Protocol = "ssh" | "rdp" | "https";
 
 export interface SecretFields {
   /** A sealed credential on the server; never its value. */
@@ -88,6 +88,7 @@ const messages: Record<string, string> = {
   invalid_secret: "That password or key is empty or too large.",
   master_password_required:
     "This file is protected with a master password. Enter it to import.",
+  open_in_browser: "HTTPS connections open in the SidiOS Browser.",
   nla_required:
     "This server does not offer Network Level Authentication, which your administrator requires.",
   node_in_trash: "That item is in the Trash. Restore it first.",

@@ -18,8 +18,8 @@ import {
 } from "./SecretField";
 import { colors, input, label, primaryBtn } from "./styles";
 
-const PROTOCOLS: Protocol[] = ["ssh", "rdp"];
-const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389 };
+const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https"];
+const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, https: 443 };
 
 type Props = {
   node: Node | null;
@@ -85,6 +85,8 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
   }
 
   const isRdp = protocol === "rdp";
+  // HTTPS connections open in the SidiOS Browser and use no Remota credential.
+  const isWeb = protocol === "https";
   const inheritedGw = inherited.gateway
     ? `${inherited.gateway.value.host} (from ${inherited.gateway.from})`
     : undefined;
@@ -130,6 +132,13 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
         )}
       </Field>
 
+      {isWeb && (
+        <p style={{ margin: 0, fontSize: 12, color: colors.dim }}>
+          Opens in the SidiOS Browser, which follows its own network policy. No password is used.
+        </p>
+      )}
+
+      {!isWeb && (
       <fieldset style={{ border: "none", borderTop: `1px solid ${colors.border}`, padding: "12px 0 0", margin: 0 }}>
         <legend style={{ ...label, padding: 0, marginBottom: 8 }}>
           Credentials (empty = inherit from folder)
@@ -160,8 +169,9 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
           )}
         </div>
       </fieldset>
+      )}
 
-      {!isRdp && <GatewaySection value={gw} onChange={setGw} inheritedFrom={inheritedGw} />}
+      {!isRdp && !isWeb && <GatewaySection value={gw} onChange={setGw} inheritedFrom={inheritedGw} />}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button type="submit" disabled={busy || !name.trim() || !host.trim()} style={{ ...primaryBtn, opacity: busy || !name.trim() || !host.trim() ? 0.6 : 1 }}>
@@ -172,7 +182,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
             Connect ▸
           </button>
         )}
-        {editingId && (
+        {editingId && !isWeb && (
           <button
             type="button"
             style={{ ...primaryBtn, background: "transparent", border: `1px solid ${colors.border}`, color: colors.dim }}

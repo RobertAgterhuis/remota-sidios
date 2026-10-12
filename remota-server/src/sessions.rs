@@ -196,6 +196,13 @@ async fn start(
         .await?
         .effective(&id)
         .ok_or(ApiError(StatusCode::NOT_FOUND, "not_found"))?;
+    // HTTPS connections open in the SidiOS Browser (US7): there is no Remota session for them.
+    if effective.protocol == Protocol::Https {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "open_in_browser",
+        ));
+    }
     if effective.protocol == Protocol::Rdp && effective.jump.is_some() {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
