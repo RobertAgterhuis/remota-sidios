@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   httpsUrl,
   splitHttpsUrl,
+  webUrl,
   OPEN_REQUEST,
   OPEN_RESULT,
   openInSidiosBrowser,
@@ -32,6 +33,10 @@ describe("HTTPS connections in the SidiOS Browser", () => {
     expect(httpsUrl("10.0.0.1", 8443)).toBe("https://10.0.0.1:8443/");
     expect(httpsUrl("fd00::1", 443)).toBe("https://[fd00::1]/");
     expect(httpsUrl("pve.lan", 8006, "/ui/?tab=1")).toBe("https://pve.lan:8006/ui/?tab=1");
+    expect(webUrl("http", "extranet.lan", 80, "/app")).toBe("http://extranet.lan/app");
+    expect(webUrl("http", "extranet.lan", 9080)).toBe("http://extranet.lan:9080/");
+    expect(splitHttpsUrl("http://extranet.lan/app", "http")?.path).toBe("/app");
+    expect(splitHttpsUrl("https://extranet.lan/app", "http")).toBeNull();
     expect(splitHttpsUrl("https://pve-node00.example.com")).toEqual({
       host: "pve-node00.example.com",
       port: undefined,

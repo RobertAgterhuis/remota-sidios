@@ -22,6 +22,10 @@ pub enum Protocol {
     Ftp,
     /// FTP over TLS: explicit (AUTH TLS) on any port, implicit on 990 (US8).
     Ftps,
+    /// SFTP: a file browser over SSH, with SSH's sign-in, host-key trust, and jump hosts (US9).
+    Sftp,
+    /// A web console over plain HTTP, opened in the SidiOS Browser with a warning (US9).
+    Http,
 }
 
 impl Protocol {
@@ -32,20 +36,39 @@ impl Protocol {
             Self::Https => "https",
             Self::Ftp => "ftp",
             Self::Ftps => "ftps",
+            Self::Sftp => "sftp",
+            Self::Http => "http",
         }
     }
 
     pub fn default_port(self) -> u16 {
         match self {
-            Self::Ssh => 22,
+            Self::Ssh | Self::Sftp => 22,
             Self::Rdp => 3389,
             Self::Https => 443,
+            Self::Http => 80,
             Self::Ftp | Self::Ftps => 21,
         }
     }
 
-    pub fn is_file_transfer(self) -> bool {
+    /// FTP or FTPS (`ftp.rs`).
+    pub fn is_ftp(self) -> bool {
         matches!(self, Self::Ftp | Self::Ftps)
+    }
+
+    /// Opens in the file-browser tab (`ftp_session.rs`).
+    pub fn is_file_browser(self) -> bool {
+        matches!(self, Self::Ftp | Self::Ftps | Self::Sftp)
+    }
+
+    /// Opens in the SidiOS Browser; Remota starts no session.
+    pub fn is_web(self) -> bool {
+        matches!(self, Self::Https | Self::Http)
+    }
+
+    /// May go through an SSH jump host.
+    pub fn allows_jump(self) -> bool {
+        matches!(self, Self::Ssh | Self::Sftp)
     }
 }
 
@@ -113,7 +136,7 @@ pub struct Connection {
     pub credentials: Credentials,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<Gateway>,
-    /// HTTPS only: the page to open, from `/` (such as `/ui/` or `/admin?tab=1`).
+    /// HTTPS and HTTP only: the page to open, from `/` (such as `/ui/` or `/admin?tab=1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
@@ -590,7 +613,7 @@ fn validate_node(node: &Node) -> TreeResult<()> {
                 return Err(TreeError::Invalid("invalid_host"));
             }
             if let Some(path) = &conn.path {
-                if conn.protocol != Protocol::Https || !valid_path(path) {
+                if !conn.protocol.is_web() || !valid_path(path) {
                     return Err(TreeError::Invalid("invalid_path"));
                 }
             }

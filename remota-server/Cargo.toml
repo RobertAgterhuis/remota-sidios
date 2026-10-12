@@ -45,6 +45,7 @@ tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 suppaftp = { version = "12", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
+russh-sftp = "3"
 
 [dev-dependencies]
 md4 = "0.10"

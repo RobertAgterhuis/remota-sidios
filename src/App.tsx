@@ -19,7 +19,7 @@ import { ancestors, chainFor, inheritedValues } from "./lib/inherit";
 import type { Node } from "./lib/api";
 import { colors } from "./components/styles";
 import { downloadFile } from "./lib/browserFiles";
-import { httpsUrl, openInSidiosBrowser } from "./lib/shell";
+import { openInSidiosBrowser, webUrl } from "./lib/shell";
 import { ImportDialog, type ImportKind } from "./components/ImportDialog";
 import { AboutDialog } from "./components/AboutDialog";
 
@@ -117,10 +117,12 @@ export default function App() {
     // The server resolves inheritance, checks the policy, and issues a single-use ticket.
     const found = findConnWithChain(v.tree, id);
     if (!found) return;
-    if (found.node.conn.protocol === "https") {
+    if (found.node.conn.protocol === "https" || found.node.conn.protocol === "http") {
       const { host, port, path } = found.node.conn;
       setNotice(`Opening ${found.node.name} in the SidiOS Browser…`);
-      const result = await openInSidiosBrowser(httpsUrl(host, port, path));
+      const result = await openInSidiosBrowser(
+        webUrl(found.node.conn.protocol, host, port, path),
+      );
       setNotice(result.ok ? `${found.node.name} opened in the SidiOS Browser.` : browserMessage(result.code));
       return;
     }

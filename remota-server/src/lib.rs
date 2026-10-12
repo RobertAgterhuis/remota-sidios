@@ -12,6 +12,7 @@ use serde_json::json;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 pub mod about;
+pub mod files;
 pub mod ftp;
 pub mod ftp_session;
 pub mod identity;

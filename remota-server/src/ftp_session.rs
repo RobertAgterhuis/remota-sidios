@@ -1,10 +1,11 @@
-//! FTP and FTPS file-browser sessions (SidiOS US8).
+//! File-browser sessions over FTP, FTPS (SidiOS US8), and SFTP (US9).
 //!
 //! The session WebSocket (`/session/{id}?ticket=…`, as for SSH and RDP) carries the session's
 //! lifetime and its small commands as JSON:
 //!
 //! - server → browser: `{"type":"ready","start":"/home/ada","secure":true}`, then one
-//!   `{"type":"result","id":n,"ok":…}` per command;
+//!   `{"type":"result","id":n,"ok":…}` per command; SFTP asks about a new host key first, as an
+//!   SSH session does (`{"type":"trust",…}`, answered with `{"type":"trust","accept":…}`);
 //! - browser → server: `{"id":n,"op":"list","path":…}`, `{"id":n,"op":"mkdir","path":…}`,
 //!   `{"id":n,"op":"rename","from":…,"to":…}`, `{"id":n,"op":"delete","path":…,"folder":bool}`.
 //!
@@ -22,7 +23,7 @@ use std::{
 use axum::{
     body::{Body, Bytes},
     extract::{
-        ws::{CloseFrame, Message, WebSocket},
+        ws::{Message, WebSocket},
         Path, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -30,20 +31,19 @@ use axum::{
     routing::{get, put},
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::OwnedMutexGuard,
-};
+use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    ftp::{self, Client, FtpFail, Login, Target},
+    files::{Files, Reader},
+    ftp::{self, Client, FtpFail, Login},
     identity::WebosUser,
     model::Protocol,
-    ssh::{close, IDLE_LIMIT},
+    ssh::{self, close, Browser, Hop, SftpFail, IDLE_LIMIT},
+    store::Store,
     tree::{ApiError, ApiResult},
     webos::{AuditEvent, SharedWebos},
     AppState,
@@ -94,7 +94,7 @@ impl FtpOutcome {
     }
 }
 
-type Shared = Arc<tokio::sync::Mutex<Option<Client>>>;
+type Shared = Arc<tokio::sync::Mutex<Option<Files>>>;
 
 /// A running session, as the transfer routes find it.
 struct Handle {
@@ -188,80 +188,126 @@ fn close_for(error: &FtpFail) -> (u16, &'static str, FtpOutcome) {
     }
 }
 
-/// One FTP session: signs in, then answers commands until either side ends it.
-#[allow(clippy::too_many_arguments)]
+/// Where a file session connects and how it signs in.
+pub enum Server {
+    Ftp {
+        target: ftp::Target,
+        login: Login,
+        plan: FtpPlan,
+    },
+    Sftp {
+        target: Hop,
+        jump: Option<Hop>,
+        store: Store,
+    },
+}
+
+/// The target as the audit log names it.
+pub struct Named {
+    pub protocol: Protocol,
+    pub host: String,
+    pub port: u16,
+}
+
+/// Connects and signs in; the answer is the backend, or how the session closes.
+async fn connect(
+    browser: &Arc<Browser>,
+    server: Server,
+    user: &str,
+) -> Result<(Files, bool), (u16, &'static str, FtpOutcome)> {
+    match server {
+        Server::Ftp {
+            target,
+            login,
+            plan,
+        } => {
+            let connected = Client::connect(&target, &login, plan.fingerprint.as_deref()).await;
+            drop(login);
+            connected
+                .map(|client| (Files::Ftp(client), target.secure))
+                .map_err(|error| close_for(&error))
+        }
+        Server::Sftp {
+            target,
+            jump,
+            store,
+        } => match ssh::open_sftp(browser, &target, jump.as_ref(), store, user.to_owned()).await {
+            Ok(sftp) => Ok((Files::Sftp(sftp), true)),
+            Err(SftpFail::TrustRefused) => Err((
+                close::TRUST,
+                "host key not trusted",
+                FtpOutcome::CertificateChanged,
+            )),
+            Err(SftpFail::Failed(message)) => {
+                browser
+                    .control(json!({ "type": "error", "message": message }))
+                    .await;
+                Err((close::UNREACHABLE, "connection failed", FtpOutcome::Failed))
+            }
+        },
+    }
+}
+
+/// One file session: signs in, then answers commands until either side ends it.
 pub async fn run(
     socket: WebSocket,
     state: AppState,
     user: String,
     id: String,
-    target: Target,
-    protocol: Protocol,
-    login: Login,
-    plan: FtpPlan,
+    named: Named,
+    server: Server,
     cancel: CancellationToken,
 ) -> FtpOutcome {
-    let (mut sink, mut source) = socket.split();
+    let (browser, reader) = Browser::attach(socket);
     let connected = tokio::select! {
-        result = Client::connect(&target, &login, plan.fingerprint.as_deref()) => result,
-        _ = cancel.cancelled() => Err(FtpFail::Closed),
+        result = connect(&browser, server, &user) => result,
+        _ = cancel.cancelled() => Err((close::REVOKED, "revoked", FtpOutcome::Revoked)),
     };
-    drop(login);
-    let client = match connected {
-        Ok(client) => client,
-        Err(error) => {
-            let (code, reason, outcome) = if cancel.is_cancelled() {
-                (close::REVOKED, "revoked", FtpOutcome::Revoked)
-            } else {
-                close_for(&error)
-            };
-            let _ = sink.send(closing(code, reason)).await;
+    let (mut files, secure) = match connected {
+        Ok(connected) => connected,
+        Err((code, reason, outcome)) => {
+            browser.close(code, reason).await;
+            reader.abort();
             return outcome;
         }
     };
-    let ready = json!({ "type": "ready", "start": client.start, "secure": target.secure });
+    let ready = json!({ "type": "ready", "start": files.start().await, "secure": secure });
     let handle = Arc::new(Handle {
         user: user.clone(),
-        client: Arc::new(tokio::sync::Mutex::new(Some(client))),
+        client: Arc::new(tokio::sync::Mutex::new(Some(files))),
         cancel: cancel.clone(),
         activity: Mutex::new(Instant::now()),
         audit: Audit {
             webos: state.webos.clone(),
             user,
-            protocol,
-            host: target.host.clone(),
-            port: target.port(),
+            protocol: named.protocol,
+            host: named.host,
+            port: named.port,
         },
     });
     state.ftp.insert(&id, handle.clone());
-    let (code, reason, outcome) = if sink.send(text(&ready)).await.is_err() {
-        (close::ENDED, "ended", FtpOutcome::Ended)
+    let (code, reason, outcome) = if browser.send(text(&ready)).await {
+        serve(&browser, &handle).await
     } else {
-        serve(&mut sink, &mut source, &handle).await
+        (close::ENDED, "ended", FtpOutcome::Ended)
     };
     state.ftp.remove(&id);
-    let _ = sink.send(closing(code, reason)).await;
+    browser.close(code, reason).await;
+    reader.abort();
     // Waits for a running transfer to end (the cancellation stops it) before signing out.
-    if let Some(client) = handle.client.lock().await.take() {
-        client.quit().await;
+    if let Some(files) = handle.client.lock().await.take() {
+        files.quit().await;
     }
     outcome
 }
 
-type Sink = futures_util::stream::SplitSink<WebSocket, Message>;
-type Source = futures_util::stream::SplitStream<WebSocket>;
-
-async fn serve(
-    sink: &mut Sink,
-    source: &mut Source,
-    handle: &Handle,
-) -> (u16, &'static str, FtpOutcome) {
+async fn serve(browser: &Browser, handle: &Handle) -> (u16, &'static str, FtpOutcome) {
     let mut tick = tokio::time::interval(TICK);
     let mut last_keep_alive = Instant::now();
     loop {
         tokio::select! {
-            message = source.next() => match message {
-                Some(Ok(Message::Text(body))) => {
+            message = browser.next() => match message {
+                Some(Message::Text(body)) => {
                     handle.touch();
                     let answer = tokio::select! {
                         answer = command(handle, body.as_str()) => answer,
@@ -270,17 +316,17 @@ async fn serve(
                         }
                     };
                     let lost = answer["code"] == "connection_closed";
-                    if sink.send(text(&answer)).await.is_err() {
+                    if !browser.send(text(&answer)).await {
                         return (close::ENDED, "ended", FtpOutcome::Ended);
                     }
                     if lost {
                         return (close::UNREACHABLE, "connection lost", FtpOutcome::Failed);
                     }
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                Some(Message::Close(_)) | None => {
                     return (close::ENDED, "ended", FtpOutcome::Ended);
                 }
-                Some(Ok(_)) => {}
+                Some(_) => {}
             },
             _ = handle.cancel.cancelled() => return (close::REVOKED, "revoked", FtpOutcome::Revoked),
             _ = tick.tick() => {
@@ -309,13 +355,6 @@ async fn serve(
 
 fn text(value: &Value) -> Message {
     Message::Text(value.to_string().into())
-}
-
-fn closing(code: u16, reason: &'static str) -> Message {
-    Message::Close(Some(CloseFrame {
-        code,
-        reason: reason.into(),
-    }))
 }
 
 #[derive(Deserialize)]
@@ -457,8 +496,8 @@ impl Drop for TransferAudit {
 }
 
 struct Download {
-    _guard: OwnedMutexGuard<Option<Client>>,
-    transfer: Option<ftp::Transfer>,
+    _guard: OwnedMutexGuard<Option<Files>>,
+    transfer: Option<Reader>,
     handle: Arc<Handle>,
     audit: Option<TransferAudit>,
     /// Bytes still to send when the length was announced: the HTTP side stops reading after the
@@ -467,8 +506,8 @@ struct Download {
 }
 
 impl Download {
-    async fn complete(&mut self, transfer: ftp::Transfer) -> Result<(), FtpFail> {
-        let finished = ftp::finish(transfer).await;
+    async fn complete(&mut self, transfer: Reader) -> Result<(), FtpFail> {
+        let finished = transfer.finish().await;
         let outcome = if finished.is_ok() { "done" } else { "failed" };
         if let Some(audit) = self.audit.take() {
             audit.finish(outcome).await;
@@ -632,8 +671,7 @@ async fn upload(
             None => break,
         }
     }
-    let _ = transfer.flush().await;
-    match ftp::finish(transfer).await {
+    match transfer.finish().await {
         Ok(()) => {
             audit.finish("done").await;
             Ok((StatusCode::CREATED, Json(json!({ "size": sent }))).into_response())

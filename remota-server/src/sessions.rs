@@ -200,14 +200,14 @@ async fn start(
         .await?
         .effective(&id)
         .ok_or(ApiError(StatusCode::NOT_FOUND, "not_found"))?;
-    // HTTPS connections open in the SidiOS Browser (US7): there is no Remota session for them.
-    if effective.protocol == Protocol::Https {
+    // HTTPS and HTTP connections open in the SidiOS Browser (US7, US9): no Remota session.
+    if effective.protocol.is_web() {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "open_in_browser",
         ));
     }
-    if effective.protocol != Protocol::Ssh && effective.jump.is_some() {
+    if !effective.protocol.allows_jump() && effective.jump.is_some() {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             if effective.protocol == Protocol::Rdp {
@@ -253,7 +253,7 @@ async fn start(
             Err(answer) => return Ok(answer),
         }
     }
-    if plan.protocol.is_file_transfer() {
+    if plan.protocol.is_ftp() {
         match ftp_trust(&state, &user.key, &plan).await? {
             Ok(ftp) => plan.ftp = Some(ftp),
             Err(answer) => return Ok(answer),
@@ -262,7 +262,10 @@ async fn start(
     let ticket = issue(&state.webos, &user.key, &body.connection_id, &plan).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
     let rdp_answer = plan.rdp.clone();
-    let secure = plan.ftp.as_ref().map(|ftp| ftp.secure);
+    let secure = match plan.protocol {
+        Protocol::Sftp => Some(true),
+        _ => plan.ftp.as_ref().map(|ftp| ftp.secure),
+    };
     state.sessions.pending.lock().expect("sessions").insert(
         session_id.clone(),
         Pending {
@@ -514,7 +517,7 @@ async fn open(
     if pending.plan.protocol == Protocol::Rdp {
         return open_rdp(state, user, id, pending, &grant, upgrade);
     }
-    if pending.plan.protocol.is_file_transfer() {
+    if pending.plan.protocol.is_file_browser() {
         return open_ftp(state, user, id, pending, &grant, upgrade);
     }
     let Some(plan) = ssh_plan(&pending.plan, &grant, query.cols, query.rows) else {
@@ -638,7 +641,8 @@ fn password_of(
     }
 }
 
-/// The FTP path of `open`: the server signs in with the password; the browser never sees it.
+/// The file-browser path of `open` (FTP, FTPS, SFTP): the server signs in; the browser never
+/// sees the credential.
 fn open_ftp(
     state: AppState,
     user: WebosUser,
@@ -648,15 +652,32 @@ fn open_ftp(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let plan = pending.plan;
-    let Some(ftp_plan) = plan.ftp.clone() else {
-        return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
-    };
-    let login = match password_of(&plan, grant, "ftp_password_required") {
-        Ok(password) => Login {
-            username: plan.target.username.clone(),
-            password: zeroize::Zeroizing::new(password),
-        },
-        Err(error) => return error.into_response(),
+    let server = if plan.protocol == Protocol::Sftp {
+        // SFTP signs in like SSH: password or key, through the jump host if any.
+        let Some(ssh) = ssh_plan(&plan, grant, None, None) else {
+            return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
+        };
+        ftp_session::Server::Sftp {
+            target: ssh.target,
+            jump: ssh.jump,
+            store: state.store.clone(),
+        }
+    } else {
+        let Some(ftp_plan) = plan.ftp.clone() else {
+            return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
+        };
+        let login = match password_of(&plan, grant, "ftp_password_required") {
+            Ok(password) => Login {
+                username: plan.target.username.clone(),
+                password: zeroize::Zeroizing::new(password),
+            },
+            Err(error) => return error.into_response(),
+        };
+        ftp_session::Server::Ftp {
+            target: ftp_target(&plan),
+            login,
+            plan: ftp_plan,
+        }
     };
     let cancel = CancellationToken::new();
     state.sessions.running.lock().expect("sessions").insert(
@@ -673,7 +694,11 @@ fn open_ftp(
         },
     );
     let audit = audit_event(&plan);
-    let target = ftp_target(&plan);
+    let named = ftp_session::Named {
+        protocol: plan.protocol,
+        host: plan.target.host.clone(),
+        port: plan.target.port,
+    };
     upgrade.on_upgrade(move |socket| async move {
         state
             .webos
@@ -684,10 +709,8 @@ fn open_ftp(
             state.clone(),
             user.key.clone(),
             id.clone(),
-            target,
-            plan.protocol,
-            login,
-            ftp_plan,
+            named,
+            server,
             cancel,
         )
         .await;
@@ -894,6 +917,7 @@ mod tests {
 
     mod ftp;
     mod rdp;
+    mod sftp;
 
     use super::*;
     use crate::{

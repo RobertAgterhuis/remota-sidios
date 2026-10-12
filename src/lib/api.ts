@@ -2,7 +2,7 @@
 // upstream's Tauri commands. SidiOS's gateway identifies the user on every request, so there is no
 // sign-in or vault password here. Secrets are write-only: the editors may send `password`,
 // `private_key`, and `passphrase`; the server seals them and answers only `credential_id`.
-export type Protocol = "ssh" | "rdp" | "https" | "ftp" | "ftps";
+export type Protocol = "ssh" | "rdp" | "https" | "http" | "ftp" | "ftps" | "sftp";
 
 export interface SecretFields {
   /** A sealed credential on the server; never its value. */
@@ -33,7 +33,7 @@ export interface Connection {
   port?: number;
   credentials: Credentials;
   gateway?: Gateway;
-  /** HTTPS only: the page to open, from `/` (with its query). */
+  /** HTTPS and HTTP only: the page to open, from `/` (with its query). */
   path?: string;
 }
 

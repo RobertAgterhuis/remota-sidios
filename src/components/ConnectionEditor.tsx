@@ -19,8 +19,16 @@ import {
 import { colors, input, label, primaryBtn } from "./styles";
 import { splitHttpsUrl } from "../lib/shell";
 
-const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https", "ftp", "ftps"];
-const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, https: 443, ftp: 21, ftps: 21 };
+const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https", "http", "sftp", "ftp", "ftps"];
+const DEFAULT_PORT: Record<Protocol, number> = {
+  ssh: 22,
+  rdp: 3389,
+  https: 443,
+  http: 80,
+  sftp: 22,
+  ftp: 21,
+  ftps: 21,
+};
 
 type Props = {
   node: Node | null;
@@ -61,12 +69,12 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
   async function submit(ev: { preventDefault: () => void }) {
     ev.preventDefault();
     if (!name.trim() || !host.trim()) return;
-    // An HTTPS address may be pasted whole: https://host[:port][/path].
+    // A web address may be pasted whole: https://host[:port][/path].
     let target = { host: host.trim(), port: port ? Number(port) : undefined, path: path.trim() ? `/${path.trim().replace(/^\/+/u, "")}` : undefined };
-    if (protocol === "https" && host.trim().includes("://")) {
-      const url = splitHttpsUrl(host);
+    if ((protocol === "https" || protocol === "http") && host.trim().includes("://")) {
+      const url = splitHttpsUrl(host, protocol);
       if (!url) {
-        setMessage({ ok: false, text: "Enter an https:// address, or only the host name." });
+        setMessage({ ok: false, text: `Enter a ${protocol}:// address, or only the host name.` });
         return;
       }
       target = { host: url.host, port: url.port ?? target.port, path: url.path ?? target.path };
@@ -84,7 +92,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
           protocol,
           host: target.host,
           port: target.port,
-          path: protocol === "https" ? target.path : undefined,
+          path: protocol === "https" || protocol === "http" ? target.path : undefined,
           credentials: {
             username: username || undefined,
             domain: domain || undefined,
@@ -103,7 +111,8 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
 
   const isRdp = protocol === "rdp";
   // HTTPS connections open in the SidiOS Browser and use no Remota credential.
-  const isWeb = protocol === "https";
+  const isWeb = protocol === "https" || protocol === "http";
+  // FTP and FTPS sign in with a password only and cannot use a jump host; SFTP can (like SSH).
   const isFtp = protocol === "ftp" || protocol === "ftps";
   const inheritedGw = inherited.gateway
     ? `${inherited.gateway.value.host} (from ${inherited.gateway.from})`
@@ -146,7 +155,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
 
       <Field label="Host">
         {(id) => (
-          <input id={id} style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder={protocol === "https" ? "e.g. router.lan or https://router.lan:8443/ui/" : "e.g. 192.168.1.10"} />
+          <input id={id} style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder={isWeb ? `e.g. router.lan or ${protocol}://router.lan:8443/ui/` : "e.g. 192.168.1.10"} />
         )}
       </Field>
 
@@ -164,6 +173,12 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
         </p>
       )}
 
+      {protocol === "http" && (
+        <p role="note" style={{ margin: 0, fontSize: 12, color: colors.danger }}>
+          Plain HTTP: the page and anything you type into it travel unencrypted. Use HTTPS when the
+          server offers it.
+        </p>
+      )}
       {protocol === "ftp" && (
         <p role="note" style={{ margin: 0, fontSize: 12, color: colors.danger }}>
           Plain FTP sends the password and files to the server unencrypted. Use FTPS when the server offers it.

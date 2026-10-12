@@ -340,10 +340,15 @@ pub fn parse_listing(lines: &[String], machine: bool) -> Vec<Entry> {
         .map(|file| Entry::from(&file))
         .filter(|entry| !matches!(entry.name.as_str(), "" | "." | ".."))
         .collect();
+    sort_entries(&mut entries);
+    entries
+}
+
+/// Folders first, then by name, ignoring case.
+pub fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
         (a.kind != "dir", a.name.to_lowercase()).cmp(&(b.kind != "dir", b.name.to_lowercase()))
     });
-    entries
 }
 
 /// A path Remota sends to the server: never a line break or NUL (no command injection).

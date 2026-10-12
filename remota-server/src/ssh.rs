@@ -107,13 +107,41 @@ impl Trust {
 
 /// Shared by the handshake (host-key prompts) and the session loop: the browser's messages, read
 /// by one task so neither has to own the socket.
-struct Browser {
+pub struct Browser {
     sink: Sink,
     incoming: Mutex<mpsc::Receiver<Message>>,
 }
 
 impl Browser {
-    async fn control(&self, value: serde_json::Value) {
+    /// Splits the WebSocket: one task reads the browser's messages into a queue.
+    pub fn attach(socket: WebSocket) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
+        let (sink, mut stream) = socket.split();
+        let (sender, receiver) = mpsc::channel(256);
+        let reader = tokio::spawn(async move {
+            while let Some(Ok(message)) = stream.next().await {
+                if sender.send(message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let browser = Arc::new(Self {
+            sink: Arc::new(Mutex::new(sink)),
+            incoming: Mutex::new(receiver),
+        });
+        (browser, reader)
+    }
+
+    /// The browser's next message; `None` once it is gone.
+    pub async fn next(&self) -> Option<Message> {
+        self.incoming.lock().await.recv().await
+    }
+
+    /// False once the browser is gone.
+    pub async fn send(&self, message: Message) -> bool {
+        self.sink.lock().await.send(message).await.is_ok()
+    }
+
+    pub async fn control(&self, value: serde_json::Value) {
         let _ = self
             .sink
             .lock()
@@ -122,7 +150,7 @@ impl Browser {
             .await;
     }
 
-    async fn close(&self, code: u16, reason: &str) {
+    pub async fn close(&self, code: u16, reason: &str) {
         let frame = CloseFrame {
             code,
             reason: reason.chars().take(100).collect::<String>().into(),
@@ -223,19 +251,7 @@ pub async fn run(
     user: String,
     cancel: CancellationToken,
 ) -> Outcome {
-    let (sink, mut stream) = socket.split();
-    let (sender, receiver) = mpsc::channel(256);
-    let reader = tokio::spawn(async move {
-        while let Some(Ok(message)) = stream.next().await {
-            if sender.send(message).await.is_err() {
-                break;
-            }
-        }
-    });
-    let browser = Arc::new(Browser {
-        sink: Arc::new(Mutex::new(sink)),
-        incoming: Mutex::new(receiver),
-    });
+    let (browser, reader) = Browser::attach(socket);
     let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let trust = Trust {
         browser: browser.clone(),
@@ -267,11 +283,18 @@ pub async fn run(
     outcome
 }
 
-async fn session(browser: &Arc<Browser>, plan: &SshPlan, trust: &Trust) -> Result<Outcome, String> {
+/// A signed-in SSH connection; the jump host's connection, if any, stays open with it.
+pub struct Connected {
+    target: Handle<TrustingHandler>,
+    _jump: Option<Handle<TrustingHandler>>,
+}
+
+/// Connects (through the jump host, if any), checks host keys, and signs in.
+async fn reach(plan_target: &Hop, jump: Option<&Hop>, trust: &Trust) -> Result<Connected, String> {
     let config = Arc::new(Config::default());
     // The jump host's connection must stay open for the whole session, or the tunnel closes.
     let mut _jump: Option<Handle<TrustingHandler>> = None;
-    let mut target = match &plan.jump {
+    let handle = match jump {
         Some(jump) => {
             let jump_handle = sign_in(
                 connect(config.clone(), jump, trust.handler(jump)).await?,
@@ -280,24 +303,85 @@ async fn session(browser: &Arc<Browser>, plan: &SshPlan, trust: &Trust) -> Resul
             .await?;
             let channel = jump_handle
                 .channel_open_direct_tcpip(
-                    plan.target.address.ip().to_string(),
-                    u32::from(plan.target.address.port()),
+                    plan_target.address.ip().to_string(),
+                    u32::from(plan_target.address.port()),
                     "127.0.0.1",
                     0,
                 )
                 .await
-                .map_err(|_| format!("{} could not reach {}.", jump.host, plan.target.host))?;
+                .map_err(|_| format!("{} could not reach {}.", jump.host, plan_target.host))?;
             let handle =
-                client::connect_stream(config, channel.into_stream(), trust.handler(&plan.target))
+                client::connect_stream(config, channel.into_stream(), trust.handler(plan_target))
                     .await
-                    .map_err(|_| format!("Could not start SSH with {}.", plan.target.host))?;
+                    .map_err(|_| format!("Could not start SSH with {}.", plan_target.host))?;
             _jump = Some(jump_handle);
             handle
         }
-        None => connect(config, &plan.target, trust.handler(&plan.target)).await?,
+        None => connect(config, plan_target, trust.handler(plan_target)).await?,
     };
-    target = sign_in(target, &plan.target).await?;
-    let mut channel = target
+    Ok(Connected {
+        target: sign_in(handle, plan_target).await?,
+        _jump,
+    })
+}
+
+/// An SFTP session over SSH (US9), for the file browser. The SSH connection lives as long as it.
+pub struct Sftp {
+    pub session: russh_sftp::client::SftpSession,
+    _ssh: Connected,
+}
+
+pub enum SftpFail {
+    /// The user refused a new host key, or the key changed.
+    TrustRefused,
+    Failed(String),
+}
+
+/// Signs in like an SSH session (host-key prompts go to `browser`) and starts the SFTP subsystem.
+pub async fn open_sftp(
+    browser: &Arc<Browser>,
+    target: &Hop,
+    jump: Option<&Hop>,
+    store: Store,
+    user: String,
+) -> Result<Sftp, SftpFail> {
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let trust = Trust {
+        browser: browser.clone(),
+        store,
+        user,
+        refused: refused.clone(),
+    };
+    let failed = |message: String| {
+        if refused.load(std::sync::atomic::Ordering::SeqCst) {
+            SftpFail::TrustRefused
+        } else {
+            SftpFail::Failed(message)
+        }
+    };
+    let connected = reach(target, jump, &trust).await.map_err(failed)?;
+    let channel = connected
+        .target
+        .channel_open_session()
+        .await
+        .map_err(|_| failed("The server refused a session.".to_owned()))?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|_| failed("The server does not offer SFTP.".to_owned()))?;
+    let session = russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|_| failed("SFTP could not start on the server.".to_owned()))?;
+    Ok(Sftp {
+        session,
+        _ssh: connected,
+    })
+}
+
+async fn session(browser: &Arc<Browser>, plan: &SshPlan, trust: &Trust) -> Result<Outcome, String> {
+    let connected = reach(&plan.target, plan.jump.as_ref(), trust).await?;
+    let mut channel = connected
+        .target
         .channel_open_session()
         .await
         .map_err(|_| "The server refused a session.".to_owned())?;

@@ -222,3 +222,61 @@ describe("HTTPS connections in the editor", () => {
     );
   });
 });
+
+describe("SFTP in the file browser", () => {
+  it("asks about a first-seen host key and sends the answer", () => {
+    render(<FtpView wsUrl="ws://x" sessionId="s" secure />);
+    const socket = FakeSocket.last!;
+    socket.receive({ type: "trust", host: "files.example.com", port: 22, fingerprint: "SHA256:abc" });
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toContain("SHA256:abc");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Trust and connect" }));
+    expect(lastSent(socket)).toEqual({ type: "trust", accept: true });
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("shows why the server could not be reached", () => {
+    render(<FtpView wsUrl="ws://x" sessionId="s" secure />);
+    const socket = FakeSocket.last!;
+    socket.receive({ type: "error", message: "files.example.com refused the sign-in for ada." });
+    act(() => socket.onclose?.({ reason: "connection failed" }));
+    expect(screen.getByRole("alert").textContent).toContain("refused the sign-in");
+  });
+});
+
+describe("HTTP connections in the editor", () => {
+  it("warns that plain HTTP is unencrypted and keeps a pasted http:// path", async () => {
+    const onSave = vi.fn(async () => {});
+    render(<ConnectionEditor node={null} inherited={{}} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "extranet" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "http" } });
+    expect(screen.getByRole("note").textContent).toMatch(/unencrypted/u);
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "http://extranet.example.com:9080/app" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await flush();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conn: expect.objectContaining({
+          protocol: "http",
+          host: "extranet.example.com",
+          port: 9080,
+          path: "/app",
+        }),
+      }),
+    );
+  });
+
+  it("offers a key and a jump host for SFTP, unlike FTP", () => {
+    render(
+      <ConnectionEditor
+        node={{ type: "connection", id: "s", name: "s", conn: { protocol: "sftp", host: "h", credentials: {} } }}
+        inherited={{}}
+        onSave={async () => {}}
+      />,
+    );
+    expect(screen.getAllByText(/jump host/iu).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/private key/iu).length).toBeGreaterThan(0);
+  });
+});

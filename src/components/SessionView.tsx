@@ -63,7 +63,7 @@ export function SessionView({
       <SshView key={tab.epoch} wsUrl={socketUrl(tab.start)} onClosed={onDead} />
     );
   }
-  if (tab.protocol === "ftp" || tab.protocol === "ftps") {
+  if (tab.protocol === "ftp" || tab.protocol === "ftps" || tab.protocol === "sftp") {
     return (
       <FtpView
         key={tab.epoch}

@@ -357,33 +357,45 @@ impl Walk<'_> {
         name: String,
     ) -> Result<Option<Node>, ImportError> {
         let raw_protocol = element.attribute("Protocol").unwrap_or("");
-        let protocol = match raw_protocol.to_ascii_uppercase().as_str() {
-            "RDP" => Protocol::Rdp,
-            "SSH1" | "SSH2" | "SSH" => Protocol::Ssh,
-            // Opened in the SidiOS Browser (US7); plain HTTP stays skipped.
-            "HTTPS" => Protocol::Https,
-            _ => {
-                let detail = raw_protocol
-                    .chars()
-                    .filter(char::is_ascii_alphanumeric)
-                    .take(20)
-                    .collect();
-                self.skip(name, "protocol_not_supported", Some(detail));
-                return Ok(None);
-            }
-        };
         let raw_host = element.attribute("Hostname").unwrap_or("").trim();
-        // mRemoteNG's HTTPS connections often hold a whole URL (`https://host[:port][/path]`).
-        let (host, url_port, path) = if protocol == Protocol::Https {
-            match split_https_url(raw_host) {
-                Some(parts) => parts,
-                None => {
-                    self.skip(name, "invalid_host", None);
-                    return Ok(None);
+        let protocol = match raw_protocol.to_ascii_uppercase().as_str() {
+            "RDP" => Some(Protocol::Rdp),
+            "SSH1" | "SSH2" | "SSH" => Some(Protocol::Ssh),
+            // Opened in the SidiOS Browser (US7, US9).
+            "HTTPS" => Some(Protocol::Https),
+            "HTTP" => Some(Protocol::Http),
+            // An external tool: only its name tells what it opens (US9).
+            "INTAPP" => external_tool(element.attribute("ExtApp").unwrap_or(""), raw_host),
+            _ => None,
+        };
+        let Some(protocol) = protocol else {
+            let mut detail: String = raw_protocol
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(20)
+                .collect();
+            if raw_protocol.eq_ignore_ascii_case("IntApp") {
+                let tool: String = element
+                    .attribute("ExtApp")
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '.' | '_'))
+                    .take(40)
+                    .collect();
+                if !tool.trim().is_empty() {
+                    detail = format!("{detail}: {}", tool.trim());
                 }
             }
-        } else {
-            (raw_host.to_owned(), None, None)
+            self.skip(name, "protocol_not_supported", Some(detail));
+            return Ok(None);
+        };
+        // mRemoteNG often holds a whole URL in Hostname (`https://host[:port][/path]`).
+        let (host, url_port, path) = match split_url(raw_host, protocol) {
+            Some(parts) => parts,
+            None => {
+                self.skip(name, "invalid_host", None);
+                return Ok(None);
+            }
         };
         if !valid_host(&host) {
             self.skip(name, "invalid_host", None);
@@ -422,14 +434,61 @@ impl Walk<'_> {
     }
 }
 
-/// Splits an HTTPS host field into host, port, and path. A bare host name passes unchanged; a URL
-/// must be `https://` without a user name. `None` for anything else.
-fn split_https_url(raw: &str) -> Option<(String, Option<u16>, Option<String>)> {
-    let rest = match raw.get(..8) {
-        Some(scheme) if scheme.eq_ignore_ascii_case("https://") => &raw[8..],
-        _ if raw.contains("://") => return None,
-        _ => return Some((raw.to_owned(), None, None)),
+/// What an mRemoteNG external tool (`IntApp`) opens, from the tool's name and the host field's
+/// scheme: SFTP, FTPS, or FTP by name; a browser or HTTP tool by the URL's scheme. `None` for
+/// anything else (database tools, remote desktops, scripts).
+fn external_tool(tool: &str, host: &str) -> Option<Protocol> {
+    let tool = tool.to_lowercase();
+    let scheme = host
+        .split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    let named = |word: &str| tool.contains(word) || scheme.as_deref() == Some(word);
+    if named("sftp") {
+        return Some(Protocol::Sftp);
+    }
+    if named("ftps") {
+        return Some(Protocol::Ftps);
+    }
+    if named("ftp") {
+        return Some(Protocol::Ftp);
+    }
+    let browser = [
+        "browser", "chrome", "edge", "firefox", "brave", "opera", "safari", "http",
+    ]
+    .iter()
+    .any(|name| tool.contains(name));
+    match scheme.as_deref() {
+        Some("https") if browser || tool.is_empty() => Some(Protocol::Https),
+        Some("http") if browser || tool.is_empty() => Some(Protocol::Http),
+        _ => None,
+    }
+}
+
+/// The URL schemes a protocol's host field may carry.
+fn schemes(protocol: Protocol) -> &'static [&'static str] {
+    match protocol {
+        Protocol::Https => &["https"],
+        Protocol::Http => &["http"],
+        Protocol::Ftp => &["ftp"],
+        Protocol::Ftps => &["ftps", "ftp"],
+        Protocol::Sftp => &["sftp"],
+        Protocol::Ssh | Protocol::Rdp => &[],
+    }
+}
+
+/// Splits a host field into host, port, and (HTTPS and HTTP only) path. A bare host name passes
+/// unchanged; a URL must use one of the protocol's schemes and carry no user name. `None` for
+/// anything else.
+fn split_url(raw: &str, protocol: Protocol) -> Option<(String, Option<u16>, Option<String>)> {
+    let Some((scheme, rest)) = raw.split_once("://") else {
+        return Some((raw.to_owned(), None, None));
     };
+    if !schemes(protocol)
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    {
+        return None;
+    }
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(end);
     if authority.contains('@') {
@@ -448,6 +507,10 @@ fn split_https_url(raw: &str) -> Option<(String, Option<u16>, Option<String>)> {
             None => (authority.to_owned(), None),
         }
     };
+    if !protocol.is_web() {
+        // A start folder in an FTP or SFTP URL is not kept; the browser opens the home folder.
+        return Some((host, port, None));
+    }
     // The fragment never reaches the server; a lone "/" is the default page.
     let tail = tail.split('#').next().unwrap_or_default();
     let path = match tail {
@@ -644,22 +707,101 @@ mod tests {
     }
 
     #[test]
-    fn imports_https_connections_and_still_skips_plain_http() {
+    fn imports_https_and_http_connections() {
         let xml = r#"<Connections ConfVersion="2.5">
   <Node Name="router" Type="Connection" Protocol="HTTPS" Hostname="10.0.0.1" Port="8443" />
-  <Node Name="old" Type="Connection" Protocol="HTTP" Hostname="10.0.0.2" Port="80" />
+  <Node Name="old" Type="Connection" Protocol="HTTP" Hostname="http://10.0.0.2:8080/console" Port="80" />
 </Connections>"#;
         let imported = parse_mremoteng(xml, "f", None).unwrap();
         let Node::Folder { children, .. } = &imported.root else {
             panic!("root is a folder");
         };
-        let Node::Connection { conn, .. } = &children[0] else {
-            panic!("router is a connection");
+        let parts: Vec<_> = children
+            .iter()
+            .map(|child| match child {
+                Node::Connection { conn, .. } => (conn.protocol, conn.port, conn.path.clone()),
+                Node::Folder { .. } => panic!("only connections"),
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                (Protocol::Https, Some(8443), None),
+                (Protocol::Http, Some(8080), Some("/console".to_owned()))
+            ]
+        );
+        assert!(imported.report.skipped.is_empty());
+    }
+
+    #[test]
+    fn maps_external_tools_by_name_and_reports_the_others() {
+        let xml = r#"<Connections ConfVersion="2.8">
+  <Node Name="sonar" Type="Connection" Protocol="IntApp" ExtApp="Filezilla - SFTP" Hostname="sonar.example.com" Port="22" Username="ada" />
+  <Node Name="plates" Type="Connection" Protocol="IntApp" ExtApp="Filezilla - FTPS" Hostname="ftps://files.example.com:990" Port="21" />
+  <Node Name="legacy" Type="Connection" Protocol="IntApp" ExtApp="WinSCP FTP" Hostname="old.example.com" Port="21" />
+  <Node Name="extranet" Type="Connection" Protocol="IntApp" ExtApp="Chrome" Hostname="https://extranet.example.com/app/" Port="443" />
+  <Node Name="intranet" Type="Connection" Protocol="IntApp" ExtApp="Edge" Hostname="http://intranet.example.com" Port="80" />
+  <Node Name="console" Type="Connection" Protocol="IntApp" ExtApp="Chrome" Hostname="console.example.com" Port="443" />
+  <Node Name="sql" Type="Connection" Protocol="IntApp" ExtApp="SSMS" Hostname="db.example.com" Port="1433" />
+</Connections>"#;
+        let imported = parse_mremoteng(xml, "f", None).unwrap();
+        let Node::Folder { children, .. } = &imported.root else {
+            panic!("root is a folder");
         };
-        assert_eq!((conn.protocol, conn.port), (Protocol::Https, Some(8443)));
-        assert_eq!(children.len(), 1);
-        assert_eq!(imported.report.skipped[0].name, "old");
-        assert_eq!(imported.report.skipped[0].reason, "protocol_not_supported");
+        let parts: Vec<_> = children
+            .iter()
+            .map(|child| match child {
+                Node::Connection { name, conn, .. } => (
+                    name.as_str(),
+                    conn.protocol,
+                    conn.host.as_str(),
+                    conn.port,
+                    conn.path.as_deref(),
+                ),
+                Node::Folder { .. } => panic!("only connections"),
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("sonar", Protocol::Sftp, "sonar.example.com", None, None),
+                (
+                    "plates",
+                    Protocol::Ftps,
+                    "files.example.com",
+                    Some(990),
+                    None
+                ),
+                ("legacy", Protocol::Ftp, "old.example.com", None, None),
+                (
+                    "extranet",
+                    Protocol::Https,
+                    "extranet.example.com",
+                    None,
+                    Some("/app/")
+                ),
+                (
+                    "intranet",
+                    Protocol::Http,
+                    "intranet.example.com",
+                    None,
+                    None
+                ),
+            ]
+        );
+        let skipped: Vec<_> = imported
+            .report
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason, s.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("console", "protocol_not_supported", Some("IntApp: Chrome")),
+                ("sql", "protocol_not_supported", Some("IntApp: SSMS"))
+            ]
+        );
     }
 
     #[test]

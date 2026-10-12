@@ -12,19 +12,28 @@ export function shellOrigin(
   return `${location.protocol}//${location.host.replace(/^remota\./u, "")}`;
 }
 
-/** The address of an HTTPS connection: `https://host[:port]/`. */
-export function httpsUrl(host: string, port?: number, path?: string): string {
+export type WebScheme = "https" | "http";
+
+/** The address of an HTTPS or HTTP connection: `scheme://host[:port][/path]`. */
+export function webUrl(scheme: WebScheme, host: string, port?: number, path?: string): string {
   const name = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
   const page = path && path.startsWith("/") ? path : "/";
-  return `https://${name}${port && port !== 443 ? `:${port}` : ""}${page}`;
+  const standard = scheme === "https" ? 443 : 80;
+  return `${scheme}://${name}${port && port !== standard ? `:${port}` : ""}${page}`;
+}
+
+/** The address of an HTTPS connection: `https://host[:port]/`. */
+export function httpsUrl(host: string, port?: number, path?: string): string {
+  return webUrl("https", host, port, path);
 }
 
 /**
- * A URL typed or pasted as an HTTPS connection's host, split into host, port, and path (with its
- * query). `null` when it is not an `https://` URL without a user name.
+ * A URL typed or pasted as an HTTPS (or HTTP) connection's host, split into host, port, and path
+ * (with its query). `null` when it is not such a URL without a user name.
  */
 export function splitHttpsUrl(
   raw: string,
+  scheme: WebScheme = "https",
 ): { host: string; port?: number; path?: string } | null {
   let url: URL;
   try {
@@ -32,7 +41,7 @@ export function splitHttpsUrl(
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+  if (url.protocol !== `${scheme}:` || url.username || url.password || !url.hostname) return null;
   const page = `${url.pathname}${url.search}`;
   return {
     host: url.hostname.replace(/^\[(.*)\]$/u, "$1"),

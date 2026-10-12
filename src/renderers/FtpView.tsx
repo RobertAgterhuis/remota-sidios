@@ -77,6 +77,10 @@ export function FtpView({ wsUrl, sessionId, secure, onClosed }: Props) {
   const nextId = useRef(0);
   const [ready, setReady] = useState(false);
   const [ended, setEnded] = useState<string | null>(null);
+  /** SFTP: a first-seen host key, decided like in an SSH session. */
+  const [hostKey, setHostKey] = useState<{ host: string; port: number; fingerprint: string } | null>(null);
+  /** Why the server could not be reached or signed in to. */
+  const [failure, setFailure] = useState<string | null>(null);
   const [path, setPath] = useState("/");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -121,15 +125,31 @@ export function FtpView({ wsUrl, sessionId, secure, onClosed }: Props) {
     socket.current = ws;
     setReady(false);
     setEnded(null);
+    setFailure(null);
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") return;
-      let message: { type?: string; id?: number; start?: string } & Answer;
+      let message: {
+        type?: string;
+        id?: number;
+        start?: string;
+        host?: string;
+        port?: number;
+        fingerprint?: string;
+      } & Answer;
       try {
         message = JSON.parse(ev.data);
       } catch {
         return;
       }
-      if (message.type === "ready") {
+      if (message.type === "trust" && message.fingerprint) {
+        setHostKey({
+          host: message.host ?? "",
+          port: message.port ?? 22,
+          fingerprint: message.fingerprint,
+        });
+      } else if (message.type === "error" && typeof message.message === "string") {
+        setFailure(message.message);
+      } else if (message.type === "ready") {
         setReady(true);
         void open(message.start || "/");
       } else if (message.type === "result" && typeof message.id === "number") {
@@ -138,6 +158,7 @@ export function FtpView({ wsUrl, sessionId, secure, onClosed }: Props) {
       }
     };
     ws.onclose = (ev) => {
+      setHostKey(null);
       for (const resolve of waiting.values()) resolve({ ok: false, code: "connection_closed" });
       waiting.clear();
       setEnded(ev.reason || "ended");
@@ -267,10 +288,43 @@ export function FtpView({ wsUrl, sessionId, secure, onClosed }: Props) {
     ev.preventDefault();
   };
 
+  const answerHostKey = (accept: boolean) => {
+    socket.current?.send(JSON.stringify({ type: "trust", accept }));
+    setHostKey(null);
+  };
+
+  if (hostKey) {
+    return (
+      <div
+        role="alertdialog"
+        aria-labelledby="host-key-title"
+        aria-describedby="host-key-text"
+        style={{ padding: 20, display: "grid", gap: 12, maxWidth: 520 }}
+      >
+        <strong id="host-key-title" style={{ fontSize: 14 }}>
+          Trust {hostKey.host}:{hostKey.port}?
+        </strong>
+        <span id="host-key-text" style={{ fontSize: 13 }}>
+          Compare this host key fingerprint with the one the server's owner gave you before connecting.
+        </span>
+        <code style={{ fontSize: 12, overflowWrap: "anywhere" }}>{hostKey.fingerprint}</code>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={primaryBtn} onClick={() => answerHostKey(true)}>
+            Trust and connect
+          </button>
+          <button type="button" style={ghostBtn} onClick={() => answerHostKey(false)}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (ended && !ready) {
     return (
-      <div role="alert" style={{ padding: 20, color: colors.danger, fontSize: 13 }}>
-        The file session could not start: {ended}.
+      <div role="alert" style={{ padding: 20, color: colors.danger, fontSize: 13, display: "grid", gap: 6 }}>
+        <span>The file session could not start: {ended}.</span>
+        {failure && <span>{failure}</span>}
       </div>
     );
   }
