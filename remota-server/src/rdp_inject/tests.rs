@@ -4,7 +4,9 @@
 //! - `REMOTA_RDP_FIXTURE=host:port`, `REMOTA_RDP_FIXTURE_USER`, `REMOTA_RDP_FIXTURE_DOMAIN`, and
 //!   `REMOTA_RDP_FIXTURE_PASSWORD_FILE` (the password is read from a file, never an argument);
 //! - optionally `REMOTA_RDP_FIXTURE_DISPLAY` (for example `:99`) when the fixture's X display is
-//!   reachable from the test, to check keyboard and mouse effects on the remote desktop.
+//!   reachable from the test, to check the mouse position on the remote desktop, and
+//!   `REMOTA_RDP_FIXTURE_TYPED_LOG`, the log of the fixture's focused terminal, to check that typed
+//!   text arrives.
 //!
 //! The "browser" is IronRDP's connector driven the way `ironrdp-web` drives it over RDCleanPath.
 
@@ -178,6 +180,7 @@ struct Fixture {
     address: SocketAddr,
     login: TargetLogin,
     display: Option<String>,
+    typed_log: Option<String>,
 }
 
 fn fixture() -> Option<Fixture> {
@@ -195,6 +198,7 @@ fn fixture() -> Option<Fixture> {
             password: Zeroizing::new(password),
         },
         display: std::env::var("REMOTA_RDP_FIXTURE_DISPLAY").ok(),
+        typed_log: std::env::var("REMOTA_RDP_FIXTURE_TYPED_LOG").ok(),
     })
 }
 
@@ -398,12 +402,22 @@ async fn injects_the_target_credential_and_relays_a_working_desktop() {
     );
 
     if let Some(display) = &fixture.display {
-        let marker = format!(
-            "/tmp/rdpspike-{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..12]
-        );
+        // A random lowercase word: typed (not run) into the remote terminal, then looked for in its log.
+        let word: String = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_digit() {
+                    (b'g' + c as u8 - b'0') as char
+                } else {
+                    c
+                }
+            })
+            .take(16)
+            .collect();
         framed
-            .write_all(&input_events(300, 200, &format!("touch {marker}\n")))
+            .write_all(&input_events(300, 200, &word))
             .await
             .unwrap();
         read_updates(&mut framed, Duration::from_secs(3)).await;
@@ -414,11 +428,13 @@ async fn injects_the_target_credential_and_relays_a_working_desktop() {
             .unwrap();
         let location = String::from_utf8_lossy(&location.stdout).to_string();
         assert!(location.starts_with("x:300 y:200"), "mouse: {location}");
-        assert!(
-            std::path::Path::new(&marker).exists(),
-            "keyboard: {marker} was not created on the remote desktop"
-        );
-        let _ = std::fs::remove_file(&marker);
+        if let Some(log) = &fixture.typed_log {
+            let typed = std::fs::read_to_string(log).unwrap_or_default();
+            assert!(
+                typed.contains(&word),
+                "keyboard: {word} did not reach the remote terminal"
+            );
+        }
     }
 
     let seen = seen.lock().unwrap();
