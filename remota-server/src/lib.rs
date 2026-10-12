@@ -1,35 +1,51 @@
 use std::path::PathBuf;
 
 use axum::{
-    extract::State,
+    extract::DefaultBodyLimit,
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
     Json, Router,
 };
 use serde_json::json;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 pub mod identity;
+pub mod model;
 pub mod store;
+pub mod tree;
+pub mod webos;
 
-use identity::{require_identity, WebosUser};
+use identity::require_identity;
 use store::Store;
+use webos::SharedWebos;
+
+/// Largest JSON body the API accepts (a node with a 16 KB private key fits easily).
+const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
+    pub webos: SharedWebos,
+}
+
+impl AppState {
+    pub fn new(store: Store, webos: SharedWebos) -> Self {
+        Self { store, webos }
+    }
 }
 
 /// The whole service. Only `/healthz` (the container health check) answers without a SidiOS
 /// identity; the API and the UI itself refuse any request the gateway did not identify.
-pub fn router(ui_dir: PathBuf, store: Store) -> Router {
+pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
     let identified = Router::new()
-        .route("/api/tree", get(tree))
+        .merge(tree::routes())
+        .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(require_identity))
-        .with_state(AppState { store });
+        .with_state(state);
     Router::new()
         .route("/healthz", get(healthz))
         .merge(identified)
@@ -40,20 +56,8 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
 }
 
-async fn tree(State(state): State<AppState>, user: WebosUser) -> Response {
-    let result = tokio::task::spawn_blocking(move || state.store.for_user(&user.key).tree()).await;
-    match result {
-        Ok(Ok(tree)) => Json(tree).into_response(),
-        _ => internal_error(),
-    }
-}
-
-fn internal_error() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "code": "internal_error" })),
-    )
-        .into_response()
+async fn api_not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "code": "not_found" }))).into_response()
 }
 
 #[cfg(test)]
@@ -61,14 +65,17 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
-    use store::{NewConnection, Store};
+    use std::sync::Arc;
     use tower::ServiceExt;
+    use webos::fake::FakeWebos;
 
     const ADA: &str = "0123456789abcdef01234567";
-    const BOB: &str = "76543210fedcba9876543210";
 
     fn app(store: Store) -> Router {
-        router(PathBuf::from("missing-ui"), store)
+        router(
+            PathBuf::from("missing-ui"),
+            AppState::new(store, Arc::new(FakeWebos::default())),
+        )
     }
 
     fn request(path: &str, user: Option<&str>) -> Request<Body> {
@@ -120,34 +127,6 @@ mod tests {
                 assert_eq!(body(response).await, json!({ "code": "unauthorized" }));
             }
         }
-    }
-
-    #[tokio::test]
-    async fn the_tree_route_returns_only_the_callers_rows() {
-        let store = Store::open_in_memory().unwrap();
-        for (user, id) in [(ADA, "ada-box"), (BOB, "bob-box")] {
-            store
-                .for_user(user)
-                .add_connection(&NewConnection {
-                    id,
-                    folder_id: None,
-                    name: id,
-                    protocol: "ssh",
-                    host: "10.20.0.5",
-                    port: Some(22),
-                })
-                .unwrap();
-        }
-
-        let response = app(store)
-            .oneshot(request("/api/tree", Some(ADA)))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let tree = body(response).await;
-        assert_eq!(tree["connections"].as_array().unwrap().len(), 1);
-        assert_eq!(tree["connections"][0]["id"], "ada-box");
-        assert_eq!(tree["folders"], json!([]));
     }
 
     #[tokio::test]

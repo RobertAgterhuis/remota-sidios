@@ -1,32 +1,37 @@
 import type { CSSProperties } from "react";
 
+// Every color is a SidiOS design token (app.css); components never hardcode values.
 export const colors = {
-  bg: "#0f1115",
-  panel: "#171a21",
-  border: "#262a33",
-  text: "#e6e6e6",
-  dim: "#9aa0aa",
-  accent: "#4f8cff",
-  danger: "#ff6b6b",
+  bg: "var(--color-background)",
+  panel: "var(--color-surface)",
+  raised: "var(--color-surface-raised)",
+  border: "var(--color-border)",
+  text: "var(--color-text)",
+  dim: "var(--color-text-muted)",
+  accent: "var(--color-accent)",
+  danger: "var(--color-danger)",
+  success: "var(--color-success)",
+  selected: "var(--color-selected)",
+  ssh: "var(--color-ssh)",
+  rdp: "var(--color-rdp)",
 };
 
 export const input: CSSProperties = {
-  background: "#0d0f13",
+  background: colors.bg,
   color: colors.text,
   border: `1px solid ${colors.border}`,
-  borderRadius: 6,
+  borderRadius: "var(--radius-sm)",
   padding: "8px 10px",
   fontSize: 13,
-  outline: "none",
   width: "100%",
   boxSizing: "border-box",
 };
 
 export const primaryBtn: CSSProperties = {
   background: colors.accent,
-  color: "#fff",
+  color: colors.text,
   border: "none",
-  borderRadius: 6,
+  borderRadius: "var(--radius-sm)",
   padding: "8px 12px",
   fontSize: 13,
   cursor: "pointer",
@@ -36,7 +41,7 @@ export const ghostBtn: CSSProperties = {
   background: "transparent",
   color: colors.dim,
   border: `1px solid ${colors.border}`,
-  borderRadius: 6,
+  borderRadius: "var(--radius-sm)",
   padding: "6px 10px",
   fontSize: 12,
   cursor: "pointer",

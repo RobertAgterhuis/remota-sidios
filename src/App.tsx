@@ -1,7 +1,6 @@
 import { type CSSProperties, type ReactNode, useState } from "react";
-import { useVault } from "./state/useVault";
+import { useTree } from "./state/useTree";
 import { useSessions } from "./state/useSessions";
-import { VaultUnlock } from "./components/VaultUnlock";
 import { ConnectionTree } from "./components/ConnectionTree";
 import { ConnectionEditor } from "./components/ConnectionEditor";
 import { FolderEditor } from "./components/FolderEditor";
@@ -16,8 +15,8 @@ import {
   isInSubtree,
   nodeExists,
 } from "./lib/tree";
-import { resolveCreds, resolveGateway } from "./lib/inherit";
-import type { Node } from "./lib/vaultApi";
+import { ancestors, chainFor, inheritedValues } from "./lib/inherit";
+import type { Node } from "./lib/api";
 import { colors } from "./components/styles";
 import { downloadFile, pickFile, uploadFile } from "./lib/browserFiles";
 
@@ -28,7 +27,7 @@ type Editing = {
 };
 
 export default function App() {
-  const v = useVault();
+  const v = useTree();
   const s = useSessions();
   const [editing, setEditing] = useState<Editing>({
     kind: "connection",
@@ -38,10 +37,17 @@ export default function App() {
   const [active, setActive] = useState<string>("editor");
   const [notice, setNotice] = useState<string | null>(null);
 
-  if (v.status === "checking") return <Center>Checking vault…</Center>;
-  if (v.status === "locked")
+  if (v.status === "loading") return <Center>Loading your connections…</Center>;
+  if (v.status === "error")
     return (
-      <VaultUnlock exists={v.exists} error={v.error} onUnlock={v.unlock} />
+      <Center>
+        <div role="alert" style={{ display: "grid", gap: 12, justifyItems: "center" }}>
+          <span>{v.error ?? "Your connections could not be loaded."}</span>
+          <button style={toolBtn} onClick={() => void v.refresh()}>
+            Try again
+          </button>
+        </div>
+      </Center>
     );
 
   const selected = editing.node;
@@ -66,10 +72,19 @@ export default function App() {
   }
   const newConnection = () => newConnectionAt(targetParent);
   const newFolder = () => newFolderAt(targetParent);
-  function lock() {
-    v.lock();
-    setEditing({ kind: "connection", node: null, parentId: null });
-    setActive("editor");
+  // Where empty fields of the edited node would come from.
+  const inherited = inheritedValues(
+    editing.node
+      ? (ancestors(v.tree, editing.node.id) ?? chainFor(v.tree, editing.parentId))
+      : chainFor(v.tree, editing.parentId),
+  );
+
+  async function guarded(action: () => Promise<void>) {
+    try {
+      await action();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function saveNode(n: Node) {
@@ -94,21 +109,13 @@ export default function App() {
         return;
       }
     }
+    // The server resolves inheritance, checks the policy, and issues a single-use ticket.
     const found = findConnWithChain(v.tree, id);
     if (!found) return;
-    const eff = resolveCreds(found.chain, found.node.conn);
-    const gw = resolveGateway(found.gateways, found.node.conn);
     const newId = await s.openSession({
       connId: id,
       title: found.node.name,
       protocol: found.node.conn.protocol,
-      host: found.node.conn.host,
-      port: found.node.conn.port,
-      username: eff.username,
-      password: eff.password,
-      keyPath: eff.key_path,
-      domain: eff.domain,
-      gateway: gw,
     });
     setActive(newId);
   }
@@ -129,7 +136,7 @@ export default function App() {
       isInSubtree(node, targetParentId)
     )
       return; // evita ciclo
-    await v.save(targetParentId, node);
+    await guarded(() => v.save(targetParentId, node));
   }
 
   async function importMremoteng() {
@@ -174,7 +181,7 @@ export default function App() {
       : `Move the connection "${name}" to the Trash?`;
     const ok = window.confirm(msg);
     if (!ok) return;
-    await v.remove(id); // soft-delete → lixeira (restaurável)
+    await guarded(() => v.remove(id)); // soft delete: to the Trash, restorable
     if (selected?.id === id)
       setEditing({ kind: "connection", node: null, parentId: null });
   }
@@ -183,13 +190,13 @@ export default function App() {
     const ok = window.confirm(
       "Delete this item permanently? This cannot be undone.",
     );
-    if (ok) await v.deleteForever(id);
+    if (ok) await guarded(() => v.deleteForever(id));
   }
   async function emptyTrash() {
     const ok = window.confirm(
       "Permanently delete everything in the Trash? This cannot be undone.",
     );
-    if (ok) await v.emptyTrash();
+    if (ok) await guarded(() => v.emptyTrash());
   }
 
   const menus: Menu[] = [
@@ -208,8 +215,6 @@ export default function App() {
           onClick: importRemotaJson,
         },
         { label: "Export connections (JSON)…", onClick: exportConnections },
-        "sep",
-        { label: "Lock vault", onClick: lock },
       ],
     },
     {
@@ -229,11 +234,7 @@ export default function App() {
   return (
     <div style={shell}>
       <MenuBar menus={menus} />
-      <div className="tricolore">
-        <span style={{ background: "#009246" }} />
-        <span style={{ background: "#f4f4f4" }} />
-        <span style={{ background: "#ce2b37" }} />
-      </div>
+      <div aria-hidden style={{ height: 2, background: colors.accent }} />
 
       <div style={toolbar}>
         <strong style={{ fontSize: 14, letterSpacing: 0.3 }}>Remota</strong>
@@ -251,15 +252,13 @@ export default function App() {
         <button style={toolBtn} onClick={newFolder}>
           + Folder
         </button>
-        <button style={toolBtn} onClick={lock}>
-          Lock
-        </button>
       </div>
 
       {notice && (
-        <div style={banner}>
+        <div style={banner} role="status">
           <span style={{ fontSize: 13 }}>{notice}</span>
           <button
+            aria-label="Dismiss"
             onClick={() => setNotice(null)}
             style={{ ...toolBtn, marginLeft: "auto" }}
           >
@@ -290,7 +289,7 @@ export default function App() {
           </div>
           <TrashPanel
             trash={v.tree.trash ?? []}
-            onRestore={v.restore}
+            onRestore={(id) => guarded(() => v.restore(id))}
             onDeleteForever={deleteForever}
             onEmpty={emptyTrash}
           />
@@ -324,10 +323,11 @@ export default function App() {
               }}
             >
               {editing.kind === "folder" ? (
-                <FolderEditor node={editing.node} onSave={saveNode} />
+                <FolderEditor node={editing.node} inherited={inherited} onSave={saveNode} />
               ) : (
                 <ConnectionEditor
                   node={editing.node}
+                  inherited={inherited}
                   onSave={saveNode}
                   onConnect={openConn}
                 />
@@ -338,7 +338,11 @@ export default function App() {
                 key={t.id}
                 style={{ ...pane, display: active === t.id ? "block" : "none" }}
               >
-                <SessionView tab={t} onDead={() => s.markDead(t.id)} />
+                <SessionView
+                  tab={t}
+                  onDead={() => s.markDead(t.id)}
+                  onRetry={(secret) => void s.reconnect(t.id, secret)}
+                />
               </div>
             ))}
           </div>
@@ -346,9 +350,7 @@ export default function App() {
       </div>
 
       <footer style={statusbar}>
-        <span style={{ color: "#7ee787" }}>● vault unlocked</span>
-        <Sep />
-        <span>gateway 127.0.0.1 (local)</span>
+        <span style={{ color: colors.success }}>● Signed in through SidiOS</span>
         <Sep />
         <span>
           {s.tabs.length}{" "}
@@ -372,7 +374,6 @@ function Center({ children }: { children: ReactNode }) {
         placeItems: "center",
         background: colors.bg,
         color: colors.dim,
-        fontFamily: "system-ui, sans-serif",
       }}
     >
       {children}
@@ -386,7 +387,6 @@ const shell: CSSProperties = {
   flexDirection: "column",
   background: colors.bg,
   color: colors.text,
-  fontFamily: "system-ui, sans-serif",
 };
 const toolbar: CSSProperties = {
   display: "flex",
@@ -394,13 +394,13 @@ const toolbar: CSSProperties = {
   gap: 6,
   padding: "6px 10px",
   borderBottom: `1px solid ${colors.border}`,
-  background: "#12141a",
+  background: colors.panel,
 };
 const toolBtn: CSSProperties = {
   background: "transparent",
   color: colors.dim,
   border: `1px solid ${colors.border}`,
-  borderRadius: 6,
+  borderRadius: "var(--radius-sm)",
   padding: "4px 10px",
   fontSize: 12,
   cursor: "pointer",
@@ -410,7 +410,7 @@ const banner: CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "8px 12px",
-  background: "#1b2330",
+  background: colors.raised,
   borderBottom: `1px solid ${colors.border}`,
   color: colors.text,
 };
@@ -436,7 +436,7 @@ const statusbar: CSSProperties = {
   gap: 10,
   padding: "4px 12px",
   borderTop: `1px solid ${colors.border}`,
-  background: "#12141a",
+  background: colors.panel,
   color: colors.dim,
   fontSize: 12,
 };

@@ -2,7 +2,7 @@ import { type CSSProperties, useState } from "react";
 import type { SessionTab } from "../state/useSessions";
 import { colors } from "./styles";
 
-const protoColor: Record<string, string> = { ssh: "#7ee787", rdp: "#79c0ff" };
+const protoColor: Record<string, string> = { ssh: "var(--color-ssh)", rdp: "var(--color-rdp)" };
 
 type Props = {
   tabs: SessionTab[];
@@ -42,7 +42,7 @@ export function TabBar({
             setMenu({ id: t.id, x: e.clientX, y: e.clientY });
           }}
           style={tabStyle(activeId === t.id)}
-          title={`${t.protocol.toUpperCase()} — ${t.target}`}
+          title={`${t.protocol.toUpperCase()} — ${t.title}`}
         >
           <span
             title={t.error || t.dead ? "dead / disconnected" : "live"}

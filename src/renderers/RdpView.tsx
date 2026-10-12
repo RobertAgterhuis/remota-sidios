@@ -13,11 +13,14 @@ import init, {
 import { clipRead, clipWrite } from "../lib/clipboard";
 
 type Props = {
-  proxyUrl: string; // ws:// do gateway, rota /rdp/{id}?token=…
-  destination: string; // host:porta
-  username: string;
-  password: string;
-  domain?: string;
+  /** The session WebSocket with its single-use ticket. */
+  proxyUrl: string;
+  /**
+   * A throwaway login for this one session, issued by the server. The server signs in to the
+   * target with the stored credential (credential injection); the target's password, hash, or
+   * Kerberos ticket never reaches this page (SidiOS FR-007).
+   */
+  login?: { username: string; password: string };
   onClosed?: () => void;
 };
 
@@ -108,7 +111,7 @@ function attachInput(canvas: HTMLCanvasElement, session: Session, signal: AbortS
   canvas.addEventListener("contextmenu", (e) => e.preventDefault(), { signal });
 }
 
-export function RdpView({ proxyUrl, destination, username, password, domain, onClosed }: Props) {
+export function RdpView({ proxyUrl, login, onClosed }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -134,12 +137,12 @@ export function RdpView({ proxyUrl, destination, username, password, domain, onC
       };
       const initial = measure();
       const b = new SessionBuilder();
-      b.username(username);
-      b.password(password);
-      if (domain) b.serverDomain(domain);
-      b.destination(destination);
+      b.username(login?.username ?? "");
+      b.password(login?.password ?? "");
+      // The gateway already knows the target from the ticket; this name is not used to route.
+      b.destination("remota-session:3389");
       b.proxyAddress(proxyUrl);
-      b.authToken("remota"); // o gateway não valida; o WASM exige um token
+      b.authToken("ticket-in-url"); // the ticket is in proxyUrl; the WASM requires a token
       b.desktopSize(new DesktopSize(initial.w, initial.h));
       b.renderCanvas(canvas);
       b.canvasResizedCallback(() => {});
@@ -255,10 +258,10 @@ export function RdpView({ proxyUrl, destination, username, password, domain, onC
         /* noop */
       }
     };
-  }, [proxyUrl, destination, username, password, domain]);
+  }, [proxyUrl, login]);
 
   return (
-    <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative", background: "#000" }}>
+    <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative", background: "var(--color-background)" }}>
       <canvas ref={canvasRef} tabIndex={0} style={{ width: "100%", height: "100%", outline: "none" }} />
       {err && (
         <div
@@ -267,7 +270,7 @@ export function RdpView({ proxyUrl, destination, username, password, domain, onC
             top: 8,
             left: 8,
             right: 8,
-            color: "#ff6b6b",
+            color: "var(--color-danger)",
             fontFamily: "monospace",
             fontSize: 12,
             background: "rgba(0,0,0,0.65)",

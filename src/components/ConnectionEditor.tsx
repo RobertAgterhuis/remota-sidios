@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import type { Node, Protocol } from "../lib/vaultApi";
-import { colors, input, label, primaryBtn } from "./styles";
+import type { Node, Protocol } from "../lib/api";
+import type { Inherited } from "../lib/inherit";
 import {
   GatewaySection,
   type GwForm,
@@ -9,29 +9,38 @@ import {
   gwFromModel,
   gwToModel,
 } from "./GatewaySection";
+import {
+  SecretField,
+  type SecretForm,
+  emptySecret,
+  secretFromModel,
+  secretToModel,
+} from "./SecretField";
+import { colors, input, label, primaryBtn } from "./styles";
 
 const PROTOCOLS: Protocol[] = ["ssh", "rdp"];
 const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389 };
 
 type Props = {
   node: Node | null;
+  /** What the folders above provide, to show where empty fields come from. */
+  inherited: Inherited;
   onSave: (node: Node) => Promise<void>;
   onConnect?: (id: string) => void;
 };
 
-export function ConnectionEditor({ node, onSave, onConnect }: Props) {
+export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) {
   const editingId = node?.type === "connection" ? node.id : null;
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState<Protocol>("ssh");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("");
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [domain, setDomain] = useState("");
-  const [keyPath, setKeyPath] = useState("");
+  const [secret, setSecret] = useState<SecretForm>(emptySecret);
   const [gw, setGw] = useState<GwForm>(emptyGw);
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const e = node?.type === "connection" ? node : null;
@@ -40,159 +49,133 @@ export function ConnectionEditor({ node, onSave, onConnect }: Props) {
     setHost(e?.conn.host ?? "");
     setPort(e?.conn.port ? String(e.conn.port) : "");
     setUsername(e?.conn.credentials.username ?? "");
-    setPassword(e?.conn.credentials.password ?? "");
     setDomain(e?.conn.credentials.domain ?? "");
-    setKeyPath(e?.conn.credentials.key_path ?? "");
+    setSecret(secretFromModel(e?.conn.credentials));
     setGw(gwFromModel(e?.conn.gateway));
-    setSaved(false);
+    setMessage(null);
   }, [node]);
 
   async function submit(ev: { preventDefault: () => void }) {
     ev.preventDefault();
-    if (!name || !host) return;
+    if (!name.trim() || !host.trim()) return;
     setBusy(true);
     try {
-      const built: Node = {
+      await onSave({
         type: "connection",
         id: editingId ?? crypto.randomUUID(),
-        name,
+        name: name.trim(),
         conn: {
           protocol,
-          host,
+          host: host.trim(),
           port: port ? Number(port) : undefined,
           credentials: {
             username: username || undefined,
-            password: password || undefined,
             domain: domain || undefined,
-            key_path: keyPath || undefined,
+            ...secretToModel(secret),
           },
           gateway: gwToModel(gw),
         },
-      };
-      await onSave(built);
-      setSaved(true);
+      });
+      setMessage({ ok: true, text: "Saved" });
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
     }
   }
 
   const isRdp = protocol === "rdp";
+  const inheritedGw = inherited.gateway
+    ? `${inherited.gateway.value.host} (from ${inherited.gateway.from})`
+    : undefined;
 
   return (
     <form
       onSubmit={submit}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 12,
-        padding: 16,
-        maxWidth: 420,
-      }}
+      aria-label={editingId ? "Edit connection" : "New connection"}
+      style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, maxWidth: 420 }}
     >
       <h2 style={{ margin: 0, fontSize: 15, color: colors.text }}>
         {editingId ? "Edit connection" : "New connection"}
       </h2>
 
       <Field label="Name">
-        <input
-          style={input}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. web-prod"
-        />
+        {(id) => (
+          <input id={id} style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. web-prod" maxLength={120} />
+        )}
       </Field>
 
       <div style={{ display: "flex", gap: 10 }}>
         <Field label="Protocol" style={{ flex: 1 }}>
-          <select
-            style={{ ...input, cursor: "pointer" }}
-            value={protocol}
-            onChange={(e) => setProtocol(e.target.value as Protocol)}
-          >
-            {PROTOCOLS.map((p) => (
-              <option key={p} value={p}>
-                {p.toUpperCase()}
-                {p === "rdp" ? " (beta)" : ""}
-              </option>
-            ))}
-          </select>
+          {(id) => (
+            <select id={id} style={{ ...input, cursor: "pointer" }} value={protocol} onChange={(e) => setProtocol(e.target.value as Protocol)}>
+              {PROTOCOLS.map((p) => (
+                <option key={p} value={p}>
+                  {p.toUpperCase()}
+                </option>
+              ))}
+            </select>
+          )}
         </Field>
         <Field label="Port" style={{ width: 110 }}>
-          <input
-            style={input}
-            value={port}
-            onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))}
-            placeholder={String(DEFAULT_PORT[protocol])}
-          />
+          {(id) => (
+            <input id={id} style={input} inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))} placeholder={String(DEFAULT_PORT[protocol])} />
+          )}
         </Field>
       </div>
 
       <Field label="Host">
-        <input
-          style={input}
-          value={host}
-          onChange={(e) => setHost(e.target.value)}
-          placeholder="e.g. 192.168.1.10"
-        />
+        {(id) => (
+          <input id={id} style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. 192.168.1.10" />
+        )}
       </Field>
 
-      <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 12 }}>
-        <div style={{ ...label, marginBottom: 8 }}>
+      <fieldset style={{ border: "none", borderTop: `1px solid ${colors.border}`, padding: "12px 0 0", margin: 0 }}>
+        <legend style={{ ...label, padding: 0, marginBottom: 8 }}>
           Credentials (empty = inherit from folder)
-        </div>
+        </legend>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <input
+            aria-label="Username"
             style={input}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="username"
+            placeholder={inherited.username ? `${inherited.username.value} (from ${inherited.username.from})` : "username"}
           />
-          <input
-            style={input}
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="password"
+          <SecretField
+            prefix="Connection"
+            allowKey={!isRdp}
+            value={secret}
+            onChange={setSecret}
+            inheritedFrom={inherited.secret?.from}
           />
           {isRdp && (
             <input
+              aria-label="Domain"
               style={input}
               value={domain}
               onChange={(e) => setDomain(e.target.value)}
-              placeholder="domain (RDP)"
+              placeholder={inherited.domain ? `${inherited.domain.value} (from ${inherited.domain.from})` : "domain (RDP)"}
             />
           )}
-          <input
-            style={input}
-            value={keyPath}
-            onChange={(e) => setKeyPath(e.target.value)}
-            placeholder="SSH private key credential (optional)"
-          />
         </div>
-      </div>
+      </fieldset>
 
-      <GatewaySection value={gw} onChange={setGw} />
+      {!isRdp && <GatewaySection value={gw} onChange={setGw} inheritedFrom={inheritedGw} />}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <button
-          type="submit"
-          disabled={busy || !name || !host}
-          style={{ ...primaryBtn, opacity: busy || !name || !host ? 0.6 : 1 }}
-        >
-          {busy ? "…" : "Save"}
+        <button type="submit" disabled={busy || !name.trim() || !host.trim()} style={{ ...primaryBtn, opacity: busy || !name.trim() || !host.trim() ? 0.6 : 1 }}>
+          {busy ? "Saving…" : "Save"}
         </button>
         {editingId && onConnect && (
-          <button
-            type="button"
-            onClick={() => onConnect(editingId)}
-            style={{ ...primaryBtn, background: "#2ea043" }}
-            title="Open session (same as double-click in the tree)"
-          >
+          <button type="button" onClick={() => onConnect(editingId)} style={{ ...primaryBtn, background: colors.raised }} title="Open session (same as double-click in the tree)">
             Connect ▸
           </button>
         )}
-        {saved && (
-          <span style={{ color: "#7ee787", fontSize: 12 }}>Saved ✓</span>
+        {message && (
+          <span role="status" style={{ color: message.ok ? colors.success : colors.danger, fontSize: 12 }}>
+            {message.text}
+          </span>
         )}
       </div>
     </form>
@@ -205,13 +188,16 @@ function Field({
   style,
 }: {
   label: string;
-  children: ReactNode;
+  children: (id: string) => ReactNode;
   style?: CSSProperties;
 }) {
+  const id = useId();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, ...style }}>
-      <span style={label}>{text}</span>
-      {children}
+      <label htmlFor={id} style={label}>
+        {text}
+      </label>
+      {children(id)}
     </div>
   );
 }

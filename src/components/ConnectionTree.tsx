@@ -1,7 +1,15 @@
-import { type CSSProperties, type MouseEvent, useState } from "react";
-import type { Connection, Credentials, Document, Node } from "../lib/vaultApi";
+import {
+  type CSSProperties,
+  type KeyboardEvent,
+  type MouseEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import type { Connection, Credentials, Document, Node } from "../lib/api";
 import { ContextMenu, type CtxItem } from "./ContextMenu";
 import { colors } from "./styles";
+import { treeKeyAction, visibleRows } from "../lib/treeKeys";
 
 /** Todos os ids de pasta na árvore (para expand/collapse all). */
 function allFolderIds(nodes: Node[]): string[] {
@@ -19,8 +27,8 @@ function allFolderIds(nodes: Node[]): string[] {
 }
 
 const protoColor: Record<string, string> = {
-  ssh: "#7ee787",
-  rdp: "#79c0ff",
+  ssh: colors.ssh,
+  rdp: colors.rdp,
 };
 
 /** Username efetivo de uma conexão dada a cadeia de defaults das pastas-pai. */
@@ -76,6 +84,77 @@ export function ConnectionTree({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(selectedId);
+  const [cutId, setCutId] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const treeRef = useRef<HTMLDivElement>(null);
+  const rows = visibleRows(doc.nodes, collapsed);
+  const tabStop =
+    rows.find((row) => row.node.id === focusId)?.node.id ??
+    rows.find((row) => row.node.id === selectedId)?.node.id ??
+    rows[0]?.node.id ??
+    null;
+
+  useEffect(() => {
+    if (selectedId) setFocusId(selectedId);
+  }, [selectedId]);
+
+  function focusRow(id: string) {
+    setFocusId(id);
+    const row = rows.find((r) => r.node.id === id);
+    if (row) onSelect(row.node);
+    requestAnimationFrame(() =>
+      treeRef.current
+        ?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(id)}"]`)
+        ?.focus(),
+    );
+  }
+
+  function onKeyDown(e: KeyboardEvent) {
+    if ((e.target as HTMLElement).closest("button")) return;
+    const action = treeKeyAction(e, rows, tabStop, collapsed);
+    if (!action) return;
+    e.preventDefault();
+    const nodeOf = (id: string) => rows.find((r) => r.node.id === id)?.node;
+    switch (action.kind) {
+      case "focus":
+        return focusRow(action.id);
+      case "expand":
+      case "collapse":
+        return toggle(action.id);
+      case "open": {
+        const node = nodeOf(action.id);
+        if (node?.type === "connection") onOpen(node);
+        else if (node) toggle(node.id);
+        return;
+      }
+      case "delete":
+        return onDelete(action.id);
+      case "cut":
+        setCutId(action.id);
+        setAnnouncement(`${nodeOf(action.id)?.name ?? "Item"} cut. Press Ctrl+V on a folder to move it.`);
+        return;
+      case "paste":
+        if (cutId) {
+          onMove(cutId, action.into);
+          setAnnouncement("Moved.");
+        }
+        setCutId(null);
+        return;
+      case "cancel":
+        setCutId(null);
+        return;
+      case "menu": {
+        const element = treeRef.current?.querySelector<HTMLElement>(
+          `[data-node-id="${CSS.escape(action.id)}"]`,
+        );
+        const rect = element?.getBoundingClientRect();
+        const node = nodeOf(action.id);
+        if (node && rect) setMenu({ x: rect.left + 24, y: rect.bottom, items: itemsFor(node) });
+        return;
+      }
+    }
+  }
 
   const dnd: Dnd = {
     dragId,
@@ -139,6 +218,10 @@ export function ConnectionTree({
 
   return (
     <div
+      ref={treeRef}
+      role="tree"
+      aria-label="Connections"
+      onKeyDown={onKeyDown}
       onContextMenu={(e) => openMenu(e, null)}
       onDragOver={(e) => {
         e.preventDefault();
@@ -152,7 +235,7 @@ export function ConnectionTree({
       style={{
         padding: 6,
         minHeight: "100%",
-        outline: dropTarget === "root" ? `2px dashed ${colors.accent}` : "none",
+        outline: dropTarget === "root" ? `2px dashed ${colors.accent}` : undefined,
         outlineOffset: -2,
       }}
     >
@@ -185,7 +268,7 @@ export function ConnectionTree({
       )}
       {doc.nodes.length === 0 ? (
         <div style={{ padding: 12, color: colors.dim, fontSize: 13 }}>
-          Empty — right-click here to create.
+          Empty. Use File, New connection, or right-click here.
         </div>
       ) : (
         doc.nodes.map((n) => (
@@ -195,6 +278,9 @@ export function ConnectionTree({
             depth={0}
             chain={[]}
             selectedId={selectedId}
+            tabStop={tabStop}
+            cutId={cutId}
+            onFocusRow={setFocusId}
             collapsed={collapsed}
             onToggle={toggle}
             onSelect={onSelect}
@@ -205,6 +291,9 @@ export function ConnectionTree({
           />
         ))
       )}
+      <div role="status" aria-live="polite" className="visually-hidden">
+        {announcement}
+      </div>
       {menu && (
         <ContextMenu
           x={menu.x}
@@ -222,6 +311,9 @@ function TreeNode({
   depth,
   chain,
   selectedId,
+  tabStop,
+  cutId,
+  onFocusRow,
   collapsed,
   onToggle,
   onSelect,
@@ -234,6 +326,9 @@ function TreeNode({
   depth: number;
   chain: Credentials[];
   selectedId: string | null;
+  tabStop: string | null;
+  cutId: string | null;
+  onFocusRow: (id: string) => void;
   collapsed: Set<string>;
   onToggle: (id: string) => void;
   onSelect: (node: Node) => void;
@@ -243,6 +338,15 @@ function TreeNode({
   dnd: Dnd;
 }) {
   const pad = 8 + depth * 14;
+  const itemProps = {
+    role: "treeitem",
+    "aria-level": depth + 1,
+    "aria-selected": node.id === selectedId,
+    "data-node-id": node.id,
+    tabIndex: node.id === tabStop ? 0 : -1,
+    onFocus: () => onFocusRow(node.id),
+  } as const;
+  const cut = node.id === cutId ? { opacity: 0.55 } : {};
 
   if (node.type === "folder") {
     const isCollapsed = collapsed.has(node.id);
@@ -250,6 +354,8 @@ function TreeNode({
     return (
       <div>
         <div
+          {...itemProps}
+          aria-expanded={hasChildren ? !isCollapsed : undefined}
           className="tree-row"
           draggable
           onDragStart={(e) => {
@@ -278,8 +384,9 @@ function TreeNode({
             paddingLeft: pad,
             cursor: "pointer",
             color: colors.dim,
+            ...cut,
             ...(dnd.dropTarget === node.id
-              ? { background: "#243447", outline: `1px solid ${colors.accent}` }
+              ? { background: colors.selected, outline: `1px solid ${colors.accent}` }
               : {}),
           }}
         >
@@ -330,6 +437,9 @@ function TreeNode({
               depth={depth + 1}
               chain={[...chain, node.defaults]}
               selectedId={selectedId}
+              tabStop={tabStop}
+              cutId={cutId}
+              onFocusRow={onFocusRow}
               collapsed={collapsed}
               onToggle={onToggle}
               onSelect={onSelect}
@@ -347,6 +457,7 @@ function TreeNode({
   const selected = node.id === selectedId;
   return (
     <div
+      {...itemProps}
       className="tree-row"
       draggable
       onDragStart={(e) => {
@@ -358,8 +469,8 @@ function TreeNode({
       onClick={() => onSelect(node)}
       onDoubleClick={() => onOpen(node)}
       onContextMenu={(e) => onContext(e, node)}
-      title="Double-click to open · drag to move · right-click for options"
-      style={{ ...rowStyle(selected), paddingLeft: pad, cursor: "pointer" }}
+      title="Double-click or Enter to open · drag or Ctrl+X, Ctrl+V to move · right-click or Shift+F10 for options"
+      style={{ ...rowStyle(selected), ...cut, paddingLeft: pad, cursor: "pointer" }}
     >
       <span
         style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
@@ -419,7 +530,7 @@ function rowStyle(selected: boolean) {
     fontSize: 13,
     color: colors.text,
     // Sem background quando não-selecionado, para o `.tree-row:hover` do CSS funcionar.
-    ...(selected ? { background: "#1f2530" } : {}),
+    ...(selected ? { background: colors.selected } : {}),
   } as const;
 }
 
@@ -436,8 +547,11 @@ const miniBtn: CSSProperties = {
 function DeleteBtn({ onClick }: { onClick: (e: MouseEvent) => void }) {
   return (
     <button
+      type="button"
+      tabIndex={-1}
+      aria-label="Move to Trash"
       onClick={onClick}
-      title="Delete"
+      title="Move to Trash (Delete)"
       style={{
         background: "transparent",
         border: "none",

@@ -1,5 +1,5 @@
 import { type CSSProperties, useState } from "react";
-import type { TrashEntry } from "../lib/vaultApi";
+import type { TrashEntry } from "../lib/api";
 import { colors } from "./styles";
 
 type Props = {

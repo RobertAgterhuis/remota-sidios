@@ -30,7 +30,7 @@ export function MenuBar({ menus }: { menus: Menu[] }) {
                       key={i}
                       onClick={() => { setOpen(null); it.onClick(); }}
                       style={menuItemStyle}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "#222834")}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-hover)")}
                       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                     >
                       {it.label}
@@ -50,7 +50,7 @@ const bar: CSSProperties = {
   display: "flex",
   alignItems: "stretch",
   height: 30,
-  background: "#12141a",
+  background: "var(--color-surface)",
   borderBottom: `1px solid ${colors.border}`,
   fontSize: 13,
   userSelect: "none",

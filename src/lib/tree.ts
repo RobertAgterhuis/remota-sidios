@@ -1,4 +1,4 @@
-import type { Credentials, Document, Gateway, Node } from "./vaultApi";
+import type { Credentials, Document, Gateway, Node } from "./api";
 
 export type ConnectionNode = Extract<Node, { type: "connection" }>;
 

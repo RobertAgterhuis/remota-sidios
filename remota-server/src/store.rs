@@ -1,5 +1,6 @@
-//! Remota's own data on the server (`remota.db`): each user's folders, connections, and trust
-//! records. No secret is ever stored here; nodes refer to credentials by the ID webOS gave them.
+//! Remota's own data on the server (`remota.db`): each user's connection tree (one document per
+//! user, in upstream Remota's shape) and trusted host keys and certificates. No secret is ever
+//! stored here; nodes refer to credentials by the ID the SidiOS vault gave them.
 //!
 //! Every read and write goes through [`UserStore`], which is bound to one user key, so a handler
 //! cannot reach another user's rows by forgetting a filter.
@@ -7,39 +8,19 @@
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+
+use crate::model::{Document, Protocol, TreeError};
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS folders (
-  id TEXT PRIMARY KEY,
-  user_key TEXT NOT NULL,
-  parent_id TEXT,
-  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
-  icon TEXT,
-  position INTEGER NOT NULL DEFAULT 0,
-  inherited TEXT NOT NULL DEFAULT '{}',
-  deleted_at INTEGER,
-  trash_parent_id TEXT
+CREATE TABLE IF NOT EXISTS documents (
+  user_key TEXT PRIMARY KEY CHECK (length(user_key) = 24),
+  document TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS folders_user_idx ON folders(user_key, parent_id);
-
-CREATE TABLE IF NOT EXISTS connections (
-  id TEXT PRIMARY KEY,
-  user_key TEXT NOT NULL,
-  folder_id TEXT,
-  name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
-  protocol TEXT NOT NULL CHECK (protocol IN ('ssh', 'rdp')),
-  host TEXT NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
-  port INTEGER CHECK (port IS NULL OR port BETWEEN 1 AND 65535),
-  overrides TEXT NOT NULL DEFAULT '{}',
-  position INTEGER NOT NULL DEFAULT 0,
-  deleted_at INTEGER,
-  trash_parent_id TEXT
-);
-CREATE INDEX IF NOT EXISTS connections_user_idx ON connections(user_key, folder_id);
 
 CREATE TABLE IF NOT EXISTS trust_records (
   user_key TEXT NOT NULL,
@@ -52,12 +33,27 @@ CREATE TABLE IF NOT EXISTS trust_records (
 );
 "#;
 
-#[derive(Debug)]
-pub struct StoreError(pub String);
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoreError {
+    Tree(TreeError),
+    Database(String),
+}
 
 impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
-        Self(error.to_string())
+        Self::Database(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for StoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Database(error.to_string())
+    }
+}
+
+impl From<TreeError> for StoreError {
+    fn from(error: TreeError) -> Self {
+        Self::Tree(error)
     }
 }
 
@@ -103,51 +99,6 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderRow {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub name: String,
-    pub icon: Option<String>,
-    pub position: i64,
-    pub inherited: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionRow {
-    pub id: String,
-    pub folder_id: Option<String>,
-    pub name: String,
-    pub protocol: String,
-    pub host: String,
-    pub port: Option<u16>,
-    pub position: i64,
-    pub overrides: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct Tree {
-    pub folders: Vec<FolderRow>,
-    pub connections: Vec<ConnectionRow>,
-}
-
-pub struct NewFolder<'a> {
-    pub id: &'a str,
-    pub parent_id: Option<&'a str>,
-    pub name: &'a str,
-}
-
-pub struct NewConnection<'a> {
-    pub id: &'a str,
-    pub folder_id: Option<&'a str>,
-    pub name: &'a str,
-    pub protocol: &'a str,
-    pub host: &'a str,
-    pub port: Option<u16>,
-}
-
 /// One user's view of the store.
 pub struct UserStore<'a> {
     store: &'a Store,
@@ -155,126 +106,122 @@ pub struct UserStore<'a> {
 }
 
 impl UserStore<'_> {
-    /// The user's active (not trashed) folders and connections.
-    pub fn tree(&self) -> StoreResult<Tree> {
-        let connection = self.store.lock();
-        Ok(Tree {
-            folders: folders(&connection, &self.user_key)?,
-            connections: connections(&connection, &self.user_key)?,
-        })
+    pub fn document(&self) -> StoreResult<Document> {
+        load(&self.store.lock(), &self.user_key)
     }
 
-    /// Creates a folder; a parent must be one of this user's active folders.
-    pub fn add_folder(&self, folder: &NewFolder) -> StoreResult<()> {
+    /// Applies `change` to the user's tree and saves it only if the change succeeds, all under
+    /// one lock, so concurrent changes never overwrite each other.
+    pub fn update<T>(
+        &self,
+        change: impl FnOnce(&mut Document) -> Result<T, TreeError>,
+    ) -> StoreResult<(T, Document)> {
         let connection = self.store.lock();
-        self.check_parent(&connection, folder.parent_id)?;
+        let mut document = load(&connection, &self.user_key)?;
+        let result = change(&mut document)?;
         connection.execute(
-            "INSERT INTO folders (id, user_key, parent_id, name) VALUES (?1, ?2, ?3, ?4)",
-            params![folder.id, self.user_key, folder.parent_id, folder.name],
+            "INSERT INTO documents (user_key, document, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_key) DO UPDATE SET document = excluded.document,
+               updated_at = excluded.updated_at",
+            params![self.user_key, serde_json::to_string(&document)?, now()],
         )?;
-        Ok(())
+        Ok((result, document))
     }
 
-    /// Creates a connection; its folder must be one of this user's active folders.
-    pub fn add_connection(&self, new: &NewConnection) -> StoreResult<()> {
-        let connection = self.store.lock();
-        self.check_parent(&connection, new.folder_id)?;
-        connection.execute(
-            "INSERT INTO connections (id, user_key, folder_id, name, protocol, host, port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                new.id,
-                self.user_key,
-                new.folder_id,
-                new.name,
-                new.protocol,
-                new.host,
-                new.port
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn check_parent(&self, connection: &Connection, parent: Option<&str>) -> StoreResult<()> {
-        let Some(parent) = parent else { return Ok(()) };
-        let found: Option<i64> = connection
+    /// The fingerprint the user accepted for this host, port, and protocol, if any.
+    pub fn trusted(
+        &self,
+        host: &str,
+        port: u16,
+        protocol: Protocol,
+    ) -> StoreResult<Option<String>> {
+        Ok(self
+            .store
+            .lock()
             .query_row(
-                "SELECT 1 FROM folders WHERE id = ?1 AND user_key = ?2 AND deleted_at IS NULL",
-                params![parent, self.user_key],
+                "SELECT fingerprint FROM trust_records
+                 WHERE user_key = ?1 AND host = ?2 AND port = ?3 AND protocol = ?4",
+                params![self.user_key, host, port, protocol.as_str()],
                 |row| row.get(0),
             )
-            .optional()?;
-        found
-            .map(|_| ())
-            .ok_or_else(|| StoreError("parent_not_found".to_owned()))
+            .optional()?)
+    }
+
+    /// Records a first-seen fingerprint. A different fingerprint is never replaced here; the user
+    /// must forget the old one first.
+    pub fn trust(
+        &self,
+        host: &str,
+        port: u16,
+        protocol: Protocol,
+        fingerprint: &str,
+    ) -> StoreResult<bool> {
+        let changed = self.store.lock().execute(
+            "INSERT OR IGNORE INTO trust_records
+             (user_key, host, port, protocol, fingerprint, accepted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                self.user_key,
+                host,
+                port,
+                protocol.as_str(),
+                fingerprint,
+                now()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn forget(&self, host: &str, port: u16, protocol: Protocol) -> StoreResult<bool> {
+        let changed = self.store.lock().execute(
+            "DELETE FROM trust_records
+             WHERE user_key = ?1 AND host = ?2 AND port = ?3 AND protocol = ?4",
+            params![self.user_key, host, port, protocol.as_str()],
+        )?;
+        Ok(changed == 1)
     }
 }
 
-fn folders(connection: &Connection, user_key: &str) -> StoreResult<Vec<FolderRow>> {
-    let mut statement = connection.prepare(
-        "SELECT id, parent_id, name, icon, position, inherited FROM folders
-         WHERE user_key = ?1 AND deleted_at IS NULL ORDER BY position, name, id",
-    )?;
-    let rows = statement.query_map([user_key], |row| {
-        Ok(FolderRow {
-            id: row.get(0)?,
-            parent_id: row.get(1)?,
-            name: row.get(2)?,
-            icon: row.get(3)?,
-            position: row.get(4)?,
-            inherited: json_column(row.get::<_, String>(5)?),
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+fn load(connection: &Connection, user_key: &str) -> StoreResult<Document> {
+    let text: Option<String> = connection
+        .query_row(
+            "SELECT document FROM documents WHERE user_key = ?1",
+            [user_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match text {
+        Some(text) => Ok(serde_json::from_str(&text)?),
+        None => Ok(Document::default()),
+    }
 }
 
-fn connections(connection: &Connection, user_key: &str) -> StoreResult<Vec<ConnectionRow>> {
-    let mut statement = connection.prepare(
-        "SELECT id, folder_id, name, protocol, host, port, position, overrides FROM connections
-         WHERE user_key = ?1 AND deleted_at IS NULL ORDER BY position, name, id",
-    )?;
-    let rows = statement.query_map([user_key], |row| {
-        Ok(ConnectionRow {
-            id: row.get(0)?,
-            folder_id: row.get(1)?,
-            name: row.get(2)?,
-            protocol: row.get(3)?,
-            host: row.get(4)?,
-            port: row.get(5)?,
-            position: row.get(6)?,
-            overrides: json_column(row.get::<_, String>(7)?),
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-fn json_column(text: String) -> serde_json::Value {
-    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}))
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Connection as Conn, Credentials, Node};
 
     const ADA: &str = "0123456789abcdef01234567";
     const BOB: &str = "76543210fedcba9876543210";
 
-    fn folder<'a>(id: &'a str, parent_id: Option<&'a str>) -> NewFolder<'a> {
-        NewFolder {
-            id,
-            parent_id,
-            name: id,
-        }
-    }
-
-    fn ssh<'a>(id: &'a str, folder_id: Option<&'a str>) -> NewConnection<'a> {
-        NewConnection {
-            id,
-            folder_id,
-            name: id,
-            protocol: "ssh",
-            host: "10.20.0.5",
-            port: Some(22),
+    fn ssh(id: &str) -> Node {
+        Node::Connection {
+            id: id.into(),
+            name: id.into(),
+            conn: Conn {
+                protocol: Protocol::Ssh,
+                host: "10.20.0.5".into(),
+                port: Some(22),
+                credentials: Credentials::default(),
+                gateway: None,
+            },
         }
     }
 
@@ -283,75 +230,62 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store
             .for_user(ADA)
-            .add_folder(&folder("lab", None))
-            .unwrap();
-        store
-            .for_user(ADA)
-            .add_connection(&ssh("web", Some("lab")))
+            .update(|doc| doc.upsert(None, ssh("web")))
             .unwrap();
         store
             .for_user(BOB)
-            .add_connection(&ssh("bob-box", None))
+            .update(|doc| doc.upsert(None, ssh("bob-box")))
             .unwrap();
 
-        let ada = store.for_user(ADA).tree().unwrap();
-        assert_eq!(
-            ada.folders
-                .iter()
-                .map(|f| f.id.as_str())
-                .collect::<Vec<_>>(),
-            ["lab"]
-        );
-        assert_eq!(
-            ada.connections
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect::<Vec<_>>(),
-            ["web"]
-        );
-        let bob = store.for_user(BOB).tree().unwrap();
-        assert!(bob.folders.is_empty());
-        assert_eq!(
-            bob.connections
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect::<Vec<_>>(),
-            ["bob-box"]
-        );
+        assert!(store
+            .for_user(ADA)
+            .document()
+            .unwrap()
+            .find("web")
+            .is_some());
+        assert!(store
+            .for_user(ADA)
+            .document()
+            .unwrap()
+            .find("bob-box")
+            .is_none());
+        assert!(store
+            .for_user(BOB)
+            .document()
+            .unwrap()
+            .find("web")
+            .is_none());
     }
 
     #[test]
-    fn a_user_cannot_put_nodes_into_another_users_folder() {
+    fn a_failed_change_saves_nothing() {
         let store = Store::open_in_memory().unwrap();
-        store
-            .for_user(ADA)
-            .add_folder(&folder("lab", None))
-            .unwrap();
-
-        assert!(store
-            .for_user(BOB)
-            .add_folder(&folder("sneaky", Some("lab")))
-            .is_err());
-        assert!(store
-            .for_user(BOB)
-            .add_connection(&ssh("sneaky", Some("lab")))
-            .is_err());
-        assert!(store.for_user(ADA).tree().unwrap().connections.is_empty());
+        let user = store.for_user(ADA);
+        user.update(|doc| doc.upsert(None, ssh("web"))).unwrap();
+        let result = user.update(|doc| {
+            doc.upsert(None, ssh("second"))?;
+            doc.upsert(Some("missing"), ssh("third"))
+        });
+        assert!(result.is_err());
+        assert!(user.document().unwrap().find("second").is_none());
     }
 
     #[test]
-    fn a_user_cannot_take_over_another_users_node_id() {
+    fn trust_records_are_per_user_and_never_silently_replaced() {
         let store = Store::open_in_memory().unwrap();
-        store
-            .for_user(ADA)
-            .add_connection(&ssh("web", None))
-            .unwrap();
-
-        assert!(store
-            .for_user(BOB)
-            .add_connection(&ssh("web", None))
-            .is_err());
-        assert_eq!(store.for_user(ADA).tree().unwrap().connections[0].id, "web");
+        let ada = store.for_user(ADA);
+        assert!(ada.trust("h", 22, Protocol::Ssh, "SHA256:one").unwrap());
+        assert!(!ada.trust("h", 22, Protocol::Ssh, "SHA256:two").unwrap());
+        assert_eq!(
+            ada.trusted("h", 22, Protocol::Ssh).unwrap().as_deref(),
+            Some("SHA256:one")
+        );
+        assert_eq!(
+            store.for_user(BOB).trusted("h", 22, Protocol::Ssh).unwrap(),
+            None
+        );
+        assert!(ada.forget("h", 22, Protocol::Ssh).unwrap());
+        assert_eq!(ada.trusted("h", 22, Protocol::Ssh).unwrap(), None);
     }
 
     #[test]
@@ -361,10 +295,15 @@ mod tests {
         Store::open(&path)
             .unwrap()
             .for_user(ADA)
-            .add_folder(&folder("lab", None))
+            .update(|doc| doc.upsert(None, ssh("web")))
             .unwrap();
 
         let reopened = Store::open(&path).unwrap();
-        assert_eq!(reopened.for_user(ADA).tree().unwrap().folders.len(), 1);
+        assert!(reopened
+            .for_user(ADA)
+            .document()
+            .unwrap()
+            .find("web")
+            .is_some());
     }
 }
