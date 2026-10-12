@@ -44,6 +44,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+suppaftp = { version = "12", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
 
 [dev-dependencies]
 md4 = "0.10"

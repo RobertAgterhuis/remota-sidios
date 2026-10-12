@@ -5,7 +5,8 @@
 //! probes the target, a first-seen certificate is answered with `409 certificate_unknown` and its
 //! fingerprint, and the user accepts it with `POST /api/trust/rdp`. A changed certificate is
 //! answered with `409 certificate_changed` and is never replaced silently; the user forgets the old
-//! one first (`POST /api/trust/forget`).
+//! one first (`POST /api/trust/forget`). FTPS certificates (US8) are trusted the same way through
+//! `POST /api/trust/certificate`, which also accepts RDP (`/api/trust/rdp` is its older name).
 
 use std::time::Duration;
 
@@ -40,7 +41,9 @@ use crate::{
 pub const REFUSED: u16 = close::REVOKED;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/trust/rdp", post(accept_certificate))
+    Router::new()
+        .route("/api/trust/rdp", post(accept_certificate))
+        .route("/api/trust/certificate", post(accept_certificate))
 }
 
 /// Everything an RDP session needs once its ticket is consumed.
@@ -76,8 +79,8 @@ struct AcceptBody {
     fingerprint: String,
 }
 
-/// Trusts a connection's first-seen RDP certificate after the user compared its fingerprint. The
-/// target is probed again; only the fingerprint the user saw is stored.
+/// Trusts a connection's first-seen RDP or FTPS certificate after the user compared its
+/// fingerprint. The target is probed again; only the fingerprint the user saw is stored.
 async fn accept_certificate(
     State(state): State<AppState>,
     user: WebosUser,
@@ -89,7 +92,7 @@ async fn accept_certificate(
     let effective = blocking(move || store.for_user(&key).document())
         .await?
         .effective(&id)
-        .filter(|effective| effective.protocol == Protocol::Rdp)
+        .filter(|effective| matches!(effective.protocol, Protocol::Rdp | Protocol::Ftps))
         .ok_or(ApiError(StatusCode::NOT_FOUND, "not_found"))?;
     let policy = state
         .policy
@@ -99,23 +102,33 @@ async fn accept_certificate(
     let address = resolve_pinned(&state.denies, &effective.host, effective.port)
         .await
         .map_err(|refusal| ApiError(StatusCode::FORBIDDEN, refusal.code()))?;
-    let probe = rdp_inject::probe(address, policy.allow_rdp_without_nla)
-        .await
-        .map_err(probe_error)?;
-    if probe.fingerprint != body.fingerprint {
-        return Ok(certificate_answer(
-            "certificate_changed",
-            &probe.fingerprint,
-        ));
+    let protocol = effective.protocol;
+    let presented = if protocol == Protocol::Ftps {
+        let target = crate::ftp::Target {
+            address,
+            host: effective.host.clone(),
+            secure: true,
+        };
+        crate::ftp::probe(&target)
+            .await
+            .map_err(crate::ftp_session::probe_error)?
+    } else {
+        rdp_inject::probe(address, policy.allow_rdp_without_nla)
+            .await
+            .map_err(probe_error)?
+            .fingerprint
+    };
+    if presented != body.fingerprint {
+        return Ok(certificate_answer("certificate_changed", &presented));
     }
     let store = state.store.clone();
     let key = user.key.clone();
-    let (host, port, fingerprint) = (effective.host.clone(), effective.port, probe.fingerprint);
+    let (host, port, fingerprint) = (effective.host.clone(), effective.port, presented);
     let stored = fingerprint.clone();
     let trusted = blocking(move || {
         store
             .for_user(&key)
-            .trust(&host, port, Protocol::Rdp, &stored)
+            .trust(&host, port, protocol, &stored)
     })
     .await?;
     if !trusted {
@@ -129,7 +142,7 @@ async fn accept_certificate(
             AuditEvent {
                 event: "remota.session.trust",
                 outcome: "trusted",
-                protocol: Some("rdp"),
+                protocol: Some(protocol.as_str()),
                 host: Some(effective.host.clone()),
                 port: Some(effective.port),
             },

@@ -12,6 +12,8 @@ use serde_json::json;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 pub mod about;
+pub mod ftp;
+pub mod ftp_session;
 pub mod identity;
 pub mod importer;
 pub mod model;
@@ -46,6 +48,8 @@ pub struct AppState {
     pub about: Arc<about::About>,
     /// The certificate the browser's RDP CredSSP binds to (generated per process).
     pub gateway: Arc<rdp_inject::GatewayCertificate>,
+    /// Running FTP sessions, for the download and upload routes.
+    pub ftp: ftp_session::FtpSessions,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             policy: PolicyClient::new(webos.clone()),
             denies: Arc::new(denies),
             sessions: Sessions::default(),
+            ftp: ftp_session::FtpSessions::default(),
             about: Arc::new(about::About::default()),
             gateway: Arc::new(
                 rdp_inject::GatewayCertificate::generate()
@@ -84,6 +89,7 @@ pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
         .merge(transfer::routes())
         .merge(about::routes())
         .merge(rdp_session::routes())
+        .merge(ftp_session::routes())
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

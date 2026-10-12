@@ -26,12 +26,42 @@ CREATE TABLE IF NOT EXISTS trust_records (
   user_key TEXT NOT NULL,
   host TEXT NOT NULL,
   port INTEGER NOT NULL,
-  protocol TEXT NOT NULL CHECK (protocol IN ('ssh', 'rdp')),
+  protocol TEXT NOT NULL CHECK (protocol IN ('ssh', 'rdp', 'ftps')),
   fingerprint TEXT NOT NULL,
   accepted_at INTEGER NOT NULL,
   PRIMARY KEY (user_key, host, port, protocol)
 );
 "#;
+
+/// Databases created before FTPS (SidiOS US8) only accept SSH and RDP trust records; their table
+/// is rebuilt once with the current definition, keeping every record.
+fn upgrade_trust_protocols(connection: &Connection) -> rusqlite::Result<()> {
+    let definition: String = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trust_records'",
+        [],
+        |row| row.get(0),
+    )?;
+    if definition.contains("'ftps'") {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "BEGIN;
+         ALTER TABLE trust_records RENAME TO trust_records_old;",
+    )?;
+    let rebuilt = connection
+        .execute_batch(SCHEMA)
+        .and_then(|()| {
+            connection.execute_batch(
+                "INSERT INTO trust_records SELECT * FROM trust_records_old;
+                 DROP TABLE trust_records_old;
+                 COMMIT;",
+            )
+        });
+    if rebuilt.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    rebuilt
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreError {
@@ -78,6 +108,7 @@ impl Store {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "busy_timeout", 5000)?;
         connection.execute_batch(SCHEMA)?;
+        upgrade_trust_protocols(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -210,6 +241,30 @@ mod tests {
 
     const ADA: &str = "0123456789abcdef01234567";
     const BOB: &str = "76543210fedcba9876543210";
+
+    #[test]
+    fn upgrades_an_older_trust_table_and_keeps_its_records() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&SCHEMA.replace("'ssh', 'rdp', 'ftps'", "'ssh', 'rdp'"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO trust_records VALUES (?1, 'h', 22, 'ssh', 'SHA256:kept', 1)",
+                params![ADA],
+            )
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        let records = store.for_user(ADA);
+        assert_eq!(
+            records.trusted("h", 22, Protocol::Ssh).unwrap().as_deref(),
+            Some("SHA256:kept")
+        );
+        assert!(records.trust("f", 21, Protocol::Ftps, "SHA256:new").unwrap());
+        // A second start leaves the upgraded table alone.
+        let again = store.lock();
+        upgrade_trust_protocols(&again).unwrap();
+    }
 
     fn ssh(id: &str) -> Node {
         Node::Connection {

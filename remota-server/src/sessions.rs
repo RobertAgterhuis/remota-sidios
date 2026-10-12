@@ -29,6 +29,8 @@ use crate::{
     identity::WebosUser,
     model::{Effective, Protocol},
     policy::{resolve_pinned, Refusal},
+    ftp::{self, Login},
+    ftp_session::{self, FtpPlan},
     rdp_inject::{self, TargetLogin, ThrowawayLogin},
     rdp_session::{self, RdpPlan},
     ssh::{self, Auth, Hop, Outcome, SshPlan},
@@ -64,6 +66,8 @@ struct PendingPlan {
     one_time_password: Option<String>,
     /// RDP only: the throwaway login, the trusted certificate, and the policy's RDP settings.
     rdp: Option<RdpPlan>,
+    /// FTP and FTPS only: TLS and the trusted certificate.
+    ftp: Option<FtpPlan>,
 }
 
 #[derive(Clone)]
@@ -203,10 +207,14 @@ async fn start(
             "open_in_browser",
         ));
     }
-    if effective.protocol == Protocol::Rdp && effective.jump.is_some() {
+    if effective.protocol != Protocol::Ssh && effective.jump.is_some() {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "rdp_jump_unsupported",
+            if effective.protocol == Protocol::Rdp {
+                "rdp_jump_unsupported"
+            } else {
+                "jump_unsupported"
+            },
         ));
     }
     let effective = with_secret(&state, &user.key, &body, effective).await?;
@@ -245,9 +253,16 @@ async fn start(
             Err(answer) => return Ok(answer),
         }
     }
+    if plan.protocol.is_file_transfer() {
+        match ftp_trust(&state, &user.key, &plan).await? {
+            Ok(ftp) => plan.ftp = Some(ftp),
+            Err(answer) => return Ok(answer),
+        }
+    }
     let ticket = issue(&state.webos, &user.key, &body.connection_id, &plan).await?;
     let session_id = uuid::Uuid::new_v4().to_string();
     let rdp_answer = plan.rdp.clone();
+    let secure = plan.ftp.as_ref().map(|ftp| ftp.secure);
     state.sessions.pending.lock().expect("sessions").insert(
         session_id.clone(),
         Pending {
@@ -268,6 +283,9 @@ async fn start(
             "password": rdp.throwaway.password.as_str(),
         });
         body["clipboard"] = json!(rdp.clipboard);
+    }
+    if let Some(secure) = secure {
+        body["secure"] = json!(secure);
     }
     Ok((StatusCode::CREATED, Json(body)).into_response())
 }
@@ -304,6 +322,50 @@ async fn rdp_trust(
             clipboard: policy.clipboard.rdp,
             domain,
         })),
+    }
+}
+
+/// FTPS: probes the server's certificate and checks it against the user's trust records, as for
+/// RDP. Plain FTP has no certificate. `Err` holds the answer that asks the user to decide.
+async fn ftp_trust(
+    state: &AppState,
+    user: &str,
+    plan: &PendingPlan,
+) -> ApiResult<Result<FtpPlan, Response>> {
+    if plan.protocol == Protocol::Ftp {
+        return Ok(Ok(FtpPlan {
+            secure: false,
+            fingerprint: None,
+        }));
+    }
+    let presented = ftp::probe(&ftp_target(plan))
+        .await
+        .map_err(ftp_session::probe_error)?;
+    let store = state.store.clone();
+    let (key, host, port) = (user.to_owned(), plan.target.host.clone(), plan.target.port);
+    let trusted =
+        blocking(move || store.for_user(&key).trusted(&host, port, Protocol::Ftps)).await?;
+    match trusted {
+        None => Ok(Err(rdp_session::certificate_answer(
+            "certificate_unknown",
+            &presented,
+        ))),
+        Some(trusted) if trusted != presented => Ok(Err(rdp_session::certificate_answer(
+            "certificate_changed",
+            &presented,
+        ))),
+        Some(trusted) => Ok(Ok(FtpPlan {
+            secure: true,
+            fingerprint: Some(trusted),
+        })),
+    }
+}
+
+fn ftp_target(plan: &PendingPlan) -> ftp::Target {
+    ftp::Target {
+        address: plan.target.address,
+        host: plan.target.host.clone(),
+        secure: plan.protocol == Protocol::Ftps,
     }
 }
 
@@ -394,6 +456,7 @@ async fn plan(
         jump,
         one_time_password,
         rdp: None,
+        ftp: None,
     })
 }
 
@@ -451,6 +514,9 @@ async fn open(
     if pending.plan.protocol == Protocol::Rdp {
         return open_rdp(state, user, id, pending, &grant, upgrade);
     }
+    if pending.plan.protocol.is_file_transfer() {
+        return open_ftp(state, user, id, pending, &grant, upgrade);
+    }
     let Some(plan) = ssh_plan(&pending.plan, &grant, query.cols, query.rows) else {
         return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
     };
@@ -503,23 +569,9 @@ fn open_rdp(
     let Some(rdp) = plan.rdp.clone() else {
         return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
     };
-    let released = plan
-        .target
-        .credential_id
-        .as_ref()
-        .and_then(|id| grant.credentials.iter().find(|c| &c.id == id));
-    let password = match released {
-        Some(c) if c.kind == "password" => c.secret.clone(),
-        Some(_) => {
-            return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "rdp_password_required")
-                .into_response()
-        }
-        None => match plan.one_time_password.clone() {
-            Some(password) => password,
-            None => {
-                return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response()
-            }
-        },
+    let password = match password_of(&plan, grant, "rdp_password_required") {
+        Ok(password) => password,
+        Err(error) => return error.into_response(),
     };
     let login = TargetLogin {
         username: plan.target.username.clone(),
@@ -553,6 +605,89 @@ fn open_rdp(
             login,
             rdp,
             state.gateway.clone(),
+            cancel,
+        )
+        .await;
+        state.sessions.running.lock().expect("sessions").remove(&id);
+        state
+            .webos
+            .audit(&user.key, audit("remota.session.end", outcome.audit()))
+            .await;
+    })
+}
+
+/// The target's password: the released credential, or the one-time password typed at connect
+/// time. RDP and FTP sign in with a password only.
+fn password_of(
+    plan: &PendingPlan,
+    grant: &Grant,
+    key_refused: &'static str,
+) -> Result<String, ApiError> {
+    let released = plan
+        .target
+        .credential_id
+        .as_ref()
+        .and_then(|id| grant.credentials.iter().find(|c| &c.id == id));
+    match released {
+        Some(c) if c.kind == "password" => Ok(c.secret.clone()),
+        Some(_) => Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, key_refused)),
+        None => plan
+            .one_time_password
+            .clone()
+            .ok_or(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential")),
+    }
+}
+
+/// The FTP path of `open`: the server signs in with the password; the browser never sees it.
+fn open_ftp(
+    state: AppState,
+    user: WebosUser,
+    id: String,
+    pending: Pending,
+    grant: &Grant,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let plan = pending.plan;
+    let Some(ftp_plan) = plan.ftp.clone() else {
+        return ApiError(StatusCode::UNPROCESSABLE_ENTITY, "no_credential").into_response();
+    };
+    let login = match password_of(&plan, grant, "ftp_password_required") {
+        Ok(password) => Login {
+            username: plan.target.username.clone(),
+            password: zeroize::Zeroizing::new(password),
+        },
+        Err(error) => return error.into_response(),
+    };
+    let cancel = CancellationToken::new();
+    state.sessions.running.lock().expect("sessions").insert(
+        id.clone(),
+        Running {
+            user: user.key.clone(),
+            cancel: cancel.clone(),
+            protocol: plan.protocol,
+            host: plan.target.host.clone(),
+            port: plan.target.port,
+            started_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as u64),
+        },
+    );
+    let audit = audit_event(&plan);
+    let target = ftp_target(&plan);
+    upgrade.on_upgrade(move |socket| async move {
+        state
+            .webos
+            .audit(&user.key, audit("remota.session.start", "started"))
+            .await;
+        let outcome = ftp_session::run(
+            socket,
+            state.clone(),
+            user.key.clone(),
+            id.clone(),
+            target,
+            plan.protocol,
+            login,
+            ftp_plan,
             cancel,
         )
         .await;
@@ -757,6 +892,7 @@ mod tests {
     use serde_json::{json, Value};
     use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 
+    mod ftp;
     mod rdp;
 
     use super::*;
