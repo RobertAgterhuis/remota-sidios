@@ -64,6 +64,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** A certificate decision's fingerprint (`certificate_unknown`, `certificate_changed`). */
+    readonly fingerprint?: string,
   ) {
     super(describe(code));
   }
@@ -75,6 +77,9 @@ const messages: Record<string, string> = {
   file_too_large: "The file is larger than 5 MB.",
   forbidden: "You are not allowed to do that.",
   id_mismatch: "That item could not be saved.",
+  certificate_changed:
+    "This server's certificate changed since you trusted it. Do not connect unless its owner confirms the new certificate.",
+  certificate_unknown: "Check this server's certificate before connecting.",
   invalid_file: "This is not an mRemoteNG confCons.xml or Remota JSON file.",
   invalid_host: "Enter a host name or address without spaces or a path.",
   invalid_id: "That item could not be saved.",
@@ -83,12 +88,16 @@ const messages: Record<string, string> = {
   invalid_secret: "That password or key is empty or too large.",
   master_password_required:
     "This file is protected with a master password. Enter it to import.",
+  nla_required:
+    "This server does not offer Network Level Authentication, which your administrator requires.",
   node_in_trash: "That item is in the Trash. Restore it first.",
   no_username: "Set a username on the connection or its folder first.",
   not_found: "It is no longer there.",
   policy_unavailable: "SidiOS could not check the connection policy. Try again in a moment.",
   protocol_not_allowed: "That port or protocol is not allowed for this address by your administrator.",
-  rdp_unavailable: "RDP sessions are not available yet.",
+  rdp_jump_unsupported: "RDP connections cannot go through a jump host. Remove the jump host.",
+  rdp_password_required: "RDP signs in with a password. Save a password for this connection.",
+  target_unreachable: "The server could not be reached.",
   session_limit: "You have reached the number of open sessions. Close one and try again.",
   target_not_allowed: "This address is not allowed by your administrator.",
   ticket_invalid: "The session could not be opened. Try again.",
@@ -122,10 +131,12 @@ export async function request<T>(
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as {
       code?: unknown;
+      fingerprint?: unknown;
     };
     throw new ApiError(
       response.status,
       typeof payload.code === "string" ? payload.code : "failed",
+      typeof payload.fingerprint === "string" ? payload.fingerprint : undefined,
     );
   }
   return (await response.json()) as T;
@@ -147,6 +158,11 @@ export const treeApi = {
   deleteForever: (id: string) =>
     request<Document>("DELETE", `/api/trash/${segment(id)}`),
   emptyTrash: () => request<Document>("DELETE", "/api/trash"),
+  trustCertificate: (connectionId: string, fingerprint: string) =>
+    request<{ trusted: boolean }>("POST", "/api/trust/rdp", {
+      connectionId,
+      fingerprint,
+    }),
   forgetHostKey: (connectionId: string) =>
     request<{ forgotten: boolean }>("POST", "/api/trust/forget", {
       connectionId,

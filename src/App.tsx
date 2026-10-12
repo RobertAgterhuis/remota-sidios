@@ -327,6 +327,8 @@ export default function App() {
                   tab={t}
                   onDead={() => s.markDead(t.id)}
                   onRetry={(secret) => void s.reconnect(t.id, secret)}
+                  onTrustCertificate={() => void s.trustCertificate(t.id)}
+                  onForgetCertificate={() => void s.forgetCertificate(t.id)}
                 />
               </div>
             ))}

@@ -21,6 +21,8 @@ type Props = {
    * Kerberos ticket never reaches this page (SidiOS FR-007).
    */
   login?: { username: string; password: string };
+  /** The administrator allows the RDP clipboard; the server also closes the channel when not. */
+  clipboard?: boolean;
   onClosed?: () => void;
 };
 
@@ -111,7 +113,7 @@ function attachInput(canvas: HTMLCanvasElement, session: Session, signal: AbortS
   canvas.addEventListener("contextmenu", (e) => e.preventDefault(), { signal });
 }
 
-export function RdpView({ proxyUrl, login, onClosed }: Props) {
+export function RdpView({ proxyUrl, login, clipboard = false, onClosed }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -148,36 +150,38 @@ export function RdpView({ proxyUrl, login, onClosed }: Props) {
       b.canvasResizedCallback(() => {});
       b.setCursorStyleCallback(() => {});
       b.setCursorStyleCallbackContext({});
-      // Clipboard sharing (CLIPRDR). Remote (Windows) copied → put it on the local clipboard.
-      b.remoteClipboardChangedCallback((data: ClipboardData) => {
-        try {
-          if (data.isEmpty()) return;
-          for (const item of data.items() as ClipboardItem[]) {
-            if (item.mimeType().startsWith("text/")) {
-              const v = item.value();
-              if (typeof v === "string" && v) clipWrite(v);
-              break;
-            }
-          }
-        } catch {
-          /* noop */
-        }
-      });
-      // Remote asks for our clipboard (e.g. before pasting in Windows) → push the local clipboard.
-      b.forceClipboardUpdateCallback(async () => {
-        try {
-          const text = await clipRead();
-          const data = new ClipboardData();
-          if (text) data.addText("text/plain", text);
-          await session?.onClipboardPaste(data);
-        } catch {
+      if (clipboard) {
+        // Clipboard sharing (CLIPRDR). Remote (Windows) copied → put it on the local clipboard.
+        b.remoteClipboardChangedCallback((data: ClipboardData) => {
           try {
-            await session?.onClipboardPaste(new ClipboardData());
+            if (data.isEmpty()) return;
+            for (const item of data.items() as ClipboardItem[]) {
+              if (item.mimeType().startsWith("text/")) {
+                const v = item.value();
+                if (typeof v === "string" && v) clipWrite(v);
+                break;
+              }
+            }
           } catch {
             /* noop */
           }
-        }
-      });
+        });
+        // Remote asks for our clipboard (e.g. before pasting in Windows) → push the local clipboard.
+        b.forceClipboardUpdateCallback(async () => {
+          try {
+            const text = await clipRead();
+            const data = new ClipboardData();
+            if (text) data.addText("text/plain", text);
+            await session?.onClipboardPaste(data);
+          } catch {
+            try {
+              await session?.onClipboardPaste(new ClipboardData());
+            } catch {
+              /* noop */
+            }
+          }
+        });
+      }
       b.extension(new Extension("enable_credssp", true)); // NLA/CredSSP
       b.extension(new Extension("display_control", true)); // resolução dinâmica (session.resize)
       session = await b.connect();
@@ -208,27 +212,28 @@ export function RdpView({ proxyUrl, login, onClosed }: Props) {
       });
       if (containerRef.current) resizeObserver.observe(containerRef.current);
 
-      // Local → remote clipboard: proactively announce the OS clipboard to the remote whenever it
-      // changes (on focus + a light poll), so pasting inside Windows pulls the text.
-      let lastClip = "";
-      const announceLocalClipboard = async () => {
-        if (!session) return;
-        const text = await clipRead();
-        if (text && text !== lastClip) {
-          lastClip = text;
-          try {
-            const data = new ClipboardData();
-            data.addText("text/plain", text);
-            await session.onClipboardPaste(data);
-          } catch {
-            /* noop */
+      if (clipboard) {
+        // Local → remote clipboard: proactively announce the OS clipboard to the remote whenever it
+        // changes (on focus + a light poll), so pasting inside Windows pulls the text.
+        let lastClip = "";
+        const announceLocalClipboard = async () => {
+          if (!session) return;
+          const text = await clipRead();
+          if (text && text !== lastClip) {
+            lastClip = text;
+            try {
+              const data = new ClipboardData();
+              data.addText("text/plain", text);
+              await session.onClipboardPaste(data);
+            } catch {
+              /* noop */
+            }
           }
-        }
-      };
-      clipPoll = setInterval(announceLocalClipboard, 1000);
-      canvas.addEventListener("focus", announceLocalClipboard, { signal: ac.signal });
-      window.addEventListener("focus", announceLocalClipboard, { signal: ac.signal });
-
+        };
+        clipPoll = setInterval(announceLocalClipboard, 1000);
+        canvas.addEventListener("focus", announceLocalClipboard, { signal: ac.signal });
+        window.addEventListener("focus", announceLocalClipboard, { signal: ac.signal });
+      }
       session
         .run()
         .then(() => { if (!cancelled) onClosed?.(); })
@@ -258,7 +263,7 @@ export function RdpView({ proxyUrl, login, onClosed }: Props) {
         /* noop */
       }
     };
-  }, [proxyUrl, login]);
+  }, [proxyUrl, login, clipboard]);
 
   return (
     <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative", background: "var(--color-background)" }}>
