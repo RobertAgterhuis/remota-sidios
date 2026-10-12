@@ -17,6 +17,7 @@ import {
   secretToModel,
 } from "./SecretField";
 import { colors, input, label, primaryBtn } from "./styles";
+import { splitHttpsUrl } from "../lib/shell";
 
 const PROTOCOLS: Protocol[] = ["ssh", "rdp", "https", "ftp", "ftps"];
 const DEFAULT_PORT: Record<Protocol, number> = { ssh: 22, rdp: 3389, https: 443, ftp: 21, ftps: 21 };
@@ -37,6 +38,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
   const [port, setPort] = useState("");
   const [username, setUsername] = useState("");
   const [domain, setDomain] = useState("");
+  const [path, setPath] = useState("");
   const [secret, setSecret] = useState<SecretForm>(emptySecret);
   const [gw, setGw] = useState<GwForm>(emptyGw);
   const [busy, setBusy] = useState(false);
@@ -50,6 +52,7 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
     setPort(e?.conn.port ? String(e.conn.port) : "");
     setUsername(e?.conn.credentials.username ?? "");
     setDomain(e?.conn.credentials.domain ?? "");
+    setPath(e?.conn.path ?? "");
     setSecret(secretFromModel(e?.conn.credentials));
     setGw(gwFromModel(e?.conn.gateway));
     setMessage(null);
@@ -58,6 +61,19 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
   async function submit(ev: { preventDefault: () => void }) {
     ev.preventDefault();
     if (!name.trim() || !host.trim()) return;
+    // An HTTPS address may be pasted whole: https://host[:port][/path].
+    let target = { host: host.trim(), port: port ? Number(port) : undefined, path: path.trim() ? `/${path.trim().replace(/^\/+/u, "")}` : undefined };
+    if (protocol === "https" && host.trim().includes("://")) {
+      const url = splitHttpsUrl(host);
+      if (!url) {
+        setMessage({ ok: false, text: "Enter an https:// address, or only the host name." });
+        return;
+      }
+      target = { host: url.host, port: url.port ?? target.port, path: url.path ?? target.path };
+      setHost(target.host);
+      setPort(target.port ? String(target.port) : "");
+      setPath(target.path ?? "");
+    }
     setBusy(true);
     try {
       await onSave({
@@ -66,8 +82,9 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
         name: name.trim(),
         conn: {
           protocol,
-          host: host.trim(),
-          port: port ? Number(port) : undefined,
+          host: target.host,
+          port: target.port,
+          path: protocol === "https" ? target.path : undefined,
           credentials: {
             username: username || undefined,
             domain: domain || undefined,
@@ -129,9 +146,17 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
 
       <Field label="Host">
         {(id) => (
-          <input id={id} style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. 192.168.1.10" />
+          <input id={id} style={input} value={host} onChange={(e) => setHost(e.target.value)} placeholder={protocol === "https" ? "e.g. router.lan or https://router.lan:8443/ui/" : "e.g. 192.168.1.10"} />
         )}
       </Field>
+
+      {isWeb && (
+        <Field label="Path">
+          {(id) => (
+            <input id={id} style={input} value={path} onChange={(e) => setPath(e.target.value)} placeholder="/ (optional, e.g. /ui/)" maxLength={1024} />
+          )}
+        </Field>
+      )}
 
       {isWeb && (
         <p style={{ margin: 0, fontSize: 12, color: colors.dim }}>

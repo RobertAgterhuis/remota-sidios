@@ -271,6 +271,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             conn: Conn {
+                path: None,
                 protocol: Protocol::Ssh,
                 host: "10.20.0.5".into(),
                 port: Some(22),

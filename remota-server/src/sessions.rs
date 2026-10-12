@@ -1064,6 +1064,7 @@ mod tests {
                 id: "web".into(),
                 name: "web".into(),
                 conn: Connection {
+                    path: None,
                     protocol: Protocol::Ssh,
                     host: ssh.ip().to_string(),
                     port: Some(ssh.port()),

@@ -118,9 +118,9 @@ export default function App() {
     const found = findConnWithChain(v.tree, id);
     if (!found) return;
     if (found.node.conn.protocol === "https") {
-      const { host, port } = found.node.conn;
+      const { host, port, path } = found.node.conn;
       setNotice(`Opening ${found.node.name} in the SidiOS Browser…`);
-      const result = await openInSidiosBrowser(httpsUrl(host, port));
+      const result = await openInSidiosBrowser(httpsUrl(host, port, path));
       setNotice(result.ok ? `${found.node.name} opened in the SidiOS Browser.` : browserMessage(result.code));
       return;
     }

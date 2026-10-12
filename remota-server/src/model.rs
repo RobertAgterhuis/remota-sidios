@@ -113,6 +113,9 @@ pub struct Connection {
     pub credentials: Credentials,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<Gateway>,
+    /// HTTPS only: the page to open, from `/` (such as `/ui/` or `/admin?tab=1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -561,6 +564,18 @@ pub fn valid_host(host: &str) -> bool {
         })
 }
 
+/// The longest HTTPS path kept on a connection.
+pub const MAX_PATH: usize = 1024;
+
+/// An HTTPS path with its query: from `/`, visible ASCII only, no characters a URL cannot hold.
+pub fn valid_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= MAX_PATH
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"\"<>\\^`{|}".contains(&b))
+}
+
 fn validate_node(node: &Node) -> TreeResult<()> {
     if !valid_id(node.id()) {
         return Err(TreeError::Invalid("invalid_id"));
@@ -573,6 +588,11 @@ fn validate_node(node: &Node) -> TreeResult<()> {
         Node::Connection { conn, .. } => {
             if !valid_host(&conn.host) || conn.port == Some(0) {
                 return Err(TreeError::Invalid("invalid_host"));
+            }
+            if let Some(path) = &conn.path {
+                if conn.protocol != Protocol::Https || !valid_path(path) {
+                    return Err(TreeError::Invalid("invalid_path"));
+                }
             }
             conn.gateway.as_ref()
         }
@@ -604,6 +624,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             conn: Connection {
+                path: None,
                 protocol: Protocol::Ssh,
                 host: "10.0.0.1".into(),
                 port: None,

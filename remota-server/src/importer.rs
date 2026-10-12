@@ -372,18 +372,29 @@ impl Walk<'_> {
                 return Ok(None);
             }
         };
-        let host = element
-            .attribute("Hostname")
-            .unwrap_or("")
-            .trim()
-            .to_owned();
+        let raw_host = element.attribute("Hostname").unwrap_or("").trim();
+        // mRemoteNG's HTTPS connections often hold a whole URL (`https://host[:port][/path]`).
+        let (host, url_port, path) = if protocol == Protocol::Https {
+            match split_https_url(raw_host) {
+                Some(parts) => parts,
+                None => {
+                    self.skip(name, "invalid_host", None);
+                    return Ok(None);
+                }
+            }
+        } else {
+            (raw_host.to_owned(), None, None)
+        };
         if !valid_host(&host) {
             self.skip(name, "invalid_host", None);
             return Ok(None);
         }
-        let port = element
-            .attribute("Port")
-            .and_then(|p| p.trim().parse::<u16>().ok())
+        let port = url_port
+            .or_else(|| {
+                element
+                    .attribute("Port")
+                    .and_then(|p| p.trim().parse::<u16>().ok())
+            })
             .filter(|p| *p != 0 && *p != protocol.default_port());
         if protocol == Protocol::Rdp
             && text(element, "RDGatewayUsageMethod")
@@ -405,9 +416,52 @@ impl Walk<'_> {
                 port,
                 credentials,
                 gateway: None,
+                path,
             },
         }))
     }
+}
+
+/// Splits an HTTPS host field into host, port, and path. A bare host name passes unchanged; a URL
+/// must be `https://` without a user name. `None` for anything else.
+fn split_https_url(raw: &str) -> Option<(String, Option<u16>, Option<String>)> {
+    let rest = match raw.get(..8) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("https://") => &raw[8..],
+        _ if raw.contains("://") => return None,
+        _ => return Some((raw.to_owned(), None, None)),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    if authority.contains('@') {
+        return None;
+    }
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let (address, after) = inner.split_once(']')?;
+        let port = match after {
+            "" => None,
+            after => Some(after.strip_prefix(':')?.parse::<u16>().ok()?),
+        };
+        (address.to_owned(), port)
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host.to_owned(), Some(port.parse::<u16>().ok()?)),
+            None => (authority.to_owned(), None),
+        }
+    };
+    // The fragment never reaches the server; a lone "/" is the default page.
+    let tail = tail.split('#').next().unwrap_or_default();
+    let path = match tail {
+        "" | "/" => None,
+        tail if tail.starts_with('?') => Some(format!("/{tail}")),
+        tail => Some(tail.to_owned()),
+    };
+    if path
+        .as_deref()
+        .is_some_and(|path| !crate::model::valid_path(path))
+    {
+        return None;
+    }
+    Some((host, port, path))
 }
 
 /// Parses an mRemoteNG file into one new folder named `folder_name`. Nothing is imported when
@@ -606,6 +660,91 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(imported.report.skipped[0].name, "old");
         assert_eq!(imported.report.skipped[0].reason, "protocol_not_supported");
+    }
+
+    #[test]
+    fn imports_https_connections_whose_host_is_a_url() {
+        // As mRemoteNG saves them with the EdgeChromium engine: the whole URL in Hostname.
+        let xml = r#"<Connections ConfVersion="2.8">
+  <Node Name="pve" Type="Connection" Protocol="HTTPS" Hostname="https://pve-node00.example.com" Port="443" RenderingEngine="EdgeChromium" />
+  <Node Name="nas" Type="Connection" Protocol="HTTPS" Hostname="HTTPS://nas.example.com:5001/" Port="443" />
+  <Node Name="ui" Type="Connection" Protocol="HTTPS" Hostname="https://[2001:db8::7]:8006/ui/?tab=1#top" Port="443" />
+  <Node Name="query" Type="Connection" Protocol="HTTPS" Hostname="https://fw.example.com?x=1" Port="8443" />
+  <Node Name="ftp-url" Type="Connection" Protocol="HTTPS" Hostname="ftp://files.example.com" Port="443" />
+  <Node Name="userinfo" Type="Connection" Protocol="HTTPS" Hostname="https://admin@fw.example.com" Port="443" />
+  <Node Name="ssh-url" Type="Connection" Protocol="SSH2" Hostname="https://pve-node00.example.com" Port="22" />
+</Connections>"#;
+        let imported = parse_mremoteng(xml, "f", None).unwrap();
+        let Node::Folder { children, .. } = &imported.root else {
+            panic!("root is a folder");
+        };
+        let parts: Vec<_> = children
+            .iter()
+            .map(|child| match child {
+                Node::Connection { name, conn, .. } => (
+                    name.as_str(),
+                    conn.host.as_str(),
+                    conn.port,
+                    conn.path.as_deref(),
+                ),
+                Node::Folder { .. } => panic!("only connections"),
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("pve", "pve-node00.example.com", None, None),
+                ("nas", "nas.example.com", Some(5001), None),
+                ("ui", "2001:db8::7", Some(8006), Some("/ui/?tab=1")),
+                ("query", "fw.example.com", Some(8443), Some("/?x=1")),
+            ]
+        );
+        let skipped: Vec<_> = imported
+            .report
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("ftp-url", "invalid_host"),
+                ("userinfo", "invalid_host"),
+                ("ssh-url", "invalid_host")
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_path_only_on_https_connections() {
+        let mut node = Node::Connection {
+            id: "c".into(),
+            name: "c".into(),
+            conn: Connection {
+                protocol: Protocol::Https,
+                host: "h.example.com".into(),
+                port: None,
+                credentials: Credentials::default(),
+                gateway: None,
+                path: Some("/ui/".into()),
+            },
+        };
+        let mut document = crate::model::Document::default();
+        assert!(document.upsert(None, node.clone()).is_ok());
+        for (protocol, path) in [
+            (Protocol::Ssh, "/ui/"),
+            (Protocol::Https, "ui"),
+            (Protocol::Https, "/a b"),
+        ] {
+            if let Node::Connection { conn, .. } = &mut node {
+                conn.protocol = protocol;
+                conn.path = Some(path.into());
+            }
+            assert!(
+                document.clone().upsert(None, node.clone()).is_err(),
+                "{path}"
+            );
+        }
     }
 
     #[test]

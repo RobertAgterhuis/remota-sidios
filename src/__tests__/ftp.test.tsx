@@ -198,3 +198,27 @@ describe("FTP connections in the editor", () => {
     expect(screen.getByText(/implicit on port 990/u)).toBeTruthy();
   });
 });
+
+describe("HTTPS connections in the editor", () => {
+  it("splits a pasted https:// address into host, port, and path", async () => {
+    const onSave = vi.fn(async () => {});
+    render(<ConnectionEditor node={null} inherited={{}} onSave={onSave} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pve" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "https" } });
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "https://pve-node00.example.com:8006/ui/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await flush();
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conn: expect.objectContaining({
+          protocol: "https",
+          host: "pve-node00.example.com",
+          port: 8006,
+          path: "/ui/",
+        }),
+      }),
+    );
+  });
+});

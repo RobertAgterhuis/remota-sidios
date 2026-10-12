@@ -33,6 +33,8 @@ export interface Connection {
   port?: number;
   credentials: Credentials;
   gateway?: Gateway;
+  /** HTTPS only: the page to open, from `/` (with its query). */
+  path?: string;
 }
 
 // Internally tagged enum (#[serde(tag = "type")]) on the server.

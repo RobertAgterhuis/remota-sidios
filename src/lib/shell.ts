@@ -13,9 +13,32 @@ export function shellOrigin(
 }
 
 /** The address of an HTTPS connection: `https://host[:port]/`. */
-export function httpsUrl(host: string, port?: number): string {
+export function httpsUrl(host: string, port?: number, path?: string): string {
   const name = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `https://${name}${port && port !== 443 ? `:${port}` : ""}/`;
+  const page = path && path.startsWith("/") ? path : "/";
+  return `https://${name}${port && port !== 443 ? `:${port}` : ""}${page}`;
+}
+
+/**
+ * A URL typed or pasted as an HTTPS connection's host, split into host, port, and path (with its
+ * query). `null` when it is not an `https://` URL without a user name.
+ */
+export function splitHttpsUrl(
+  raw: string,
+): { host: string; port?: number; path?: string } | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+  const page = `${url.pathname}${url.search}`;
+  return {
+    host: url.hostname.replace(/^\[(.*)\]$/u, "$1"),
+    port: url.port ? Number(url.port) : undefined,
+    path: page === "/" ? undefined : page,
+  };
 }
 
 export type OpenResult = { ok: true } | { ok: false; code: string };

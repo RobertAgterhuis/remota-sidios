@@ -450,6 +450,7 @@ impl Harness {
             id: "files".into(),
             name: "files".into(),
             conn: Connection {
+                path: None,
                 protocol,
                 host: target.ip().to_string(),
                 port: Some(target.port()),
@@ -750,6 +751,7 @@ async fn a_refused_password_ends_the_session() {
         id: "files".into(),
         name: "files".into(),
         conn: Connection {
+            path: None,
             protocol: Protocol::Ftp,
             host: target.ip().to_string(),
             port: Some(target.port()),
@@ -842,6 +844,7 @@ async fn refuses_ftp_through_a_jump_host() {
         id: "files".into(),
         name: "files".into(),
         conn: Connection {
+            path: None,
             protocol: Protocol::Ftp,
             host: "127.0.0.1".into(),
             port: Some(21),

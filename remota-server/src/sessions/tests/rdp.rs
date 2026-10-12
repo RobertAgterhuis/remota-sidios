@@ -158,6 +158,7 @@ impl Harness {
             id: "win".into(),
             name: "win".into(),
             conn: Connection {
+                path: None,
                 protocol: Protocol::Rdp,
                 host: target.ip().to_string(),
                 port: Some(target.port()),
@@ -651,6 +652,7 @@ async fn refuses_rdp_through_a_jump_host() {
         id: "win".into(),
         name: "win".into(),
         conn: Connection {
+            path: None,
             protocol: Protocol::Rdp,
             host: "127.0.0.1".into(),
             port: Some(3389),
@@ -689,6 +691,7 @@ async fn starts_no_session_for_an_https_connection() {
         id: "web".into(),
         name: "router".into(),
         conn: Connection {
+            path: None,
             protocol: Protocol::Https,
             host: "10.0.0.1".into(),
             port: Some(8443),
