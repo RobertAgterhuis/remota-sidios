@@ -96,7 +96,11 @@ impl VaultManager {
                 .as_deref()
                 .map(|pid| u.doc.find(pid).is_some())
                 .unwrap_or(false);
-            let parent = if has_parent { entry.parent_id.as_deref() } else { None };
+            let parent = if has_parent {
+                entry.parent_id.as_deref()
+            } else {
+                None
+            };
             insert_into(&mut u.doc.nodes, parent, entry.node)?;
         }
         let password = u.password.clone();
@@ -196,7 +200,6 @@ mod tests {
                 port: None,
                 credentials: Credentials::default(),
                 gateway: None,
-                relay: None,
             },
         }
     }
@@ -261,7 +264,10 @@ mod tests {
 
         mgr.delete("c1").unwrap();
         mgr.delete_forever("c1").unwrap();
-        assert!(mgr.tree().unwrap().trash.is_empty(), "delete_forever limpa da lixeira");
+        assert!(
+            mgr.tree().unwrap().trash.is_empty(),
+            "delete_forever limpa da lixeira"
+        );
     }
 
     #[test]

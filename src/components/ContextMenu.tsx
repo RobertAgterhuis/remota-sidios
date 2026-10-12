@@ -20,7 +20,7 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
               key={i}
               onClick={() => { onClose(); it.onClick(); }}
               style={item}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "#222834")}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-hover)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
               {it.label}

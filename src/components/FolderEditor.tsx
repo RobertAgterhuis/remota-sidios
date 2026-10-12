@@ -1,7 +1,15 @@
 import { type ReactNode, useEffect, useState } from "react";
-import type { Node } from "../lib/vaultApi";
+import type { Node } from "../lib/api";
+import type { Inherited } from "../lib/inherit";
 import { colors, input, label, primaryBtn } from "./styles";
 import { GatewaySection, type GwForm, emptyGw, gwFromModel, gwToModel } from "./GatewaySection";
+import {
+  SecretField,
+  type SecretForm,
+  emptySecret,
+  secretFromModel,
+  secretToModel,
+} from "./SecretField";
 
 const ICONS = [
   // pastas / storage
@@ -23,74 +31,93 @@ const ICONS = [
   "🏠", "🏢", "⭐", "🔴", "🟢", "🔵",
 ];
 
-export function FolderEditor({ node, onSave }: { node: Node | null; onSave: (n: Node) => Promise<void> }) {
+export function FolderEditor({
+  node,
+  inherited,
+  onSave,
+}: {
+  node: Node | null;
+  inherited: Inherited;
+  onSave: (n: Node) => Promise<void>;
+}) {
   const editingId = node?.type === "folder" ? node.id : null;
-  const existingChildren = node?.type === "folder" ? node.children : [];
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [domain, setDomain] = useState("");
+  const [secret, setSecret] = useState<SecretForm>(emptySecret);
   const [gw, setGw] = useState<GwForm>(emptyGw);
   const [icon, setIcon] = useState<string>("");
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const f = node?.type === "folder" ? node : null;
     setName(f?.name ?? "");
     setUsername(f?.defaults.username ?? "");
-    setPassword(f?.defaults.password ?? "");
     setDomain(f?.defaults.domain ?? "");
+    setSecret(secretFromModel(f?.defaults));
     setGw(gwFromModel(f?.gateway));
     setIcon(f?.icon ?? "");
-    setSaved(false);
+    setMessage(null);
   }, [node]);
 
   async function submit(ev: { preventDefault: () => void }) {
     ev.preventDefault();
-    if (!name) return;
+    if (!name.trim()) return;
     setBusy(true);
     try {
-      const built: Node = {
+      // The server keeps an existing folder's contents; only its own settings are sent.
+      await onSave({
         type: "folder",
         id: editingId ?? crypto.randomUUID(),
-        name,
+        name: name.trim(),
         defaults: {
           username: username || undefined,
-          password: password || undefined,
           domain: domain || undefined,
+          ...secretToModel(secret),
         },
         gateway: gwToModel(gw),
         icon: icon || undefined,
-        children: existingChildren, // preserva a subárvore ao editar
-      };
-      await onSave(built);
-      setSaved(true);
+        children: [],
+      });
+      setMessage({ ok: true, text: "Saved" });
+    } catch (e) {
+      setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
     }
   }
 
+  const inheritedGw = inherited.gateway
+    ? `${inherited.gateway.value.host} (from ${inherited.gateway.from})`
+    : undefined;
+
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, maxWidth: 420 }}>
+    <form
+      onSubmit={submit}
+      aria-label={editingId ? "Edit folder" : "New folder"}
+      style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, maxWidth: 420 }}
+    >
       <h2 style={{ margin: 0, fontSize: 15, color: colors.text }}>{editingId ? "Edit folder" : "New folder"}</h2>
       <Field label="Name">
-        <input style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Production" />
+        <input aria-label="Name" style={input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Production" maxLength={120} />
       </Field>
       <Field label="Icon">
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div role="radiogroup" aria-label="Icon" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {ICONS.map((ic) => (
             <button
               key={ic}
               type="button"
+              role="radio"
+              aria-checked={icon === ic}
               onClick={() => setIcon(ic === icon ? "" : ic)}
               style={{
                 fontSize: 18,
                 lineHeight: 1,
                 padding: "4px 7px",
-                borderRadius: 6,
+                borderRadius: "var(--radius-sm)",
                 cursor: "pointer",
-                background: icon === ic ? "#243447" : "transparent",
+                background: icon === ic ? colors.selected : "transparent",
                 border: `1px solid ${icon === ic ? colors.accent : colors.border}`,
               }}
             >
@@ -99,21 +126,42 @@ export function FolderEditor({ node, onSave }: { node: Node | null; onSave: (n: 
           ))}
         </div>
       </Field>
-      <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 12 }}>
-        <div style={{ ...label, marginBottom: 8 }}>Defaults inherited by children</div>
+      <fieldset style={{ border: "none", borderTop: `1px solid ${colors.border}`, padding: "12px 0 0", margin: 0 }}>
+        <legend style={{ ...label, padding: 0, marginBottom: 8 }}>Defaults inherited by children</legend>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input style={input} value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" />
-          <input style={input} type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" />
-          <input style={input} value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="domain" />
+          <input
+            aria-label="Username"
+            style={input}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder={inherited.username ? `${inherited.username.value} (from ${inherited.username.from})` : "username"}
+          />
+          <SecretField prefix="Folder" allowKey value={secret} onChange={setSecret} inheritedFrom={inherited.secret?.from} />
+          <input
+            aria-label="Domain"
+            style={input}
+            value={domain}
+            onChange={(e) => setDomain(e.target.value)}
+            placeholder={inherited.domain ? `${inherited.domain.value} (from ${inherited.domain.from})` : "domain"}
+          />
         </div>
-      </div>
-      <GatewaySection value={gw} onChange={setGw} hint="All connections inside this folder go out through this jump host (unless they define their own)." />
+      </fieldset>
+      <GatewaySection
+        value={gw}
+        onChange={setGw}
+        inheritedFrom={inheritedGw}
+        hint="All connections inside this folder go out through this jump host (unless they define their own)."
+      />
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button type="submit" disabled={busy || !name} style={{ ...primaryBtn, opacity: busy || !name ? 0.6 : 1 }}>
-          {busy ? "…" : "Save"}
+        <button type="submit" disabled={busy || !name.trim()} style={{ ...primaryBtn, opacity: busy || !name.trim() ? 0.6 : 1 }}>
+          {busy ? "Saving…" : "Save"}
         </button>
-        {saved && <span style={{ color: "#7ee787", fontSize: 12 }}>Saved ✓</span>}
+        {message && (
+          <span role="status" style={{ color: message.ok ? colors.success : colors.danger, fontSize: 12 }}>
+            {message.text}
+          </span>
+        )}
       </div>
     </form>
   );

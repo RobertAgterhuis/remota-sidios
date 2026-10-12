@@ -3,12 +3,11 @@ use uuid::Uuid;
 
 use crate::model::{Connection, Credentials, Node, Protocol};
 
-fn map_protocol(p: &str) -> Protocol {
+fn map_protocol(p: &str) -> Option<Protocol> {
     match p.to_ascii_uppercase().as_str() {
-        "RDP" => Protocol::Rdp,
-        "VNC" => Protocol::Vnc,
-        "TELNET" => Protocol::Telnet,
-        _ => Protocol::Ssh, // SSH1/SSH2/IntApp/... → trata como SSH
+        "RDP" => Some(Protocol::Rdp),
+        "SSH" | "SSH1" | "SSH2" => Some(Protocol::Ssh),
+        _ => None,
     }
 }
 
@@ -22,7 +21,10 @@ pub fn parse_confcons(xml: &str) -> Result<Vec<Node>, String> {
 
 fn parse_children(parent: roxmltree::Node) -> Vec<Node> {
     let mut out = Vec::new();
-    for el in parent.children().filter(|n| n.is_element() && n.has_tag_name("Node")) {
+    for el in parent
+        .children()
+        .filter(|n| n.is_element() && n.has_tag_name("Node"))
+    {
         let name = el.attribute("Name").unwrap_or("(sem nome)").to_string();
         let typ = el.attribute("Type").unwrap_or("");
 
@@ -37,10 +39,18 @@ fn parse_children(parent: roxmltree::Node) -> Vec<Node> {
             });
         } else {
             let host = el.attribute("Hostname").unwrap_or("").to_string();
-            let protocol = map_protocol(el.attribute("Protocol").unwrap_or("SSH2"));
+            let Some(protocol) = map_protocol(el.attribute("Protocol").unwrap_or("SSH2")) else {
+                continue;
+            };
             let port = el.attribute("Port").and_then(|s| s.parse::<u16>().ok());
-            let username = el.attribute("Username").filter(|s| !s.is_empty()).map(String::from);
-            let domain = el.attribute("Domain").filter(|s| !s.is_empty()).map(String::from);
+            let username = el
+                .attribute("Username")
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let domain = el
+                .attribute("Domain")
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             out.push(Node::Connection {
                 id: Uuid::new_v4().to_string(),
                 name,
@@ -48,9 +58,13 @@ fn parse_children(parent: roxmltree::Node) -> Vec<Node> {
                     protocol,
                     host,
                     port,
-                    credentials: Credentials { username, password: None, domain, key_path: None },
+                    credentials: Credentials {
+                        username,
+                        password: None,
+                        domain,
+                        key_path: None,
+                    },
                     gateway: None,
-                    relay: None,
                 },
             });
         }
@@ -85,8 +99,8 @@ mod tests {
     #[test]
     fn parses_folders_and_connections() {
         let nodes = parse_confcons(SAMPLE).unwrap();
-        assert_eq!(nodes.len(), 2);
-        assert_eq!(count_connections(&nodes), 3);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(count_connections(&nodes), 2);
 
         match &nodes[0] {
             Node::Folder { name, children, .. } => {
@@ -103,15 +117,6 @@ mod tests {
                 }
             }
             _ => panic!("esperava pasta"),
-        }
-
-        match &nodes[1] {
-            Node::Connection { name, conn, .. } => {
-                assert_eq!(name, "solo");
-                assert_eq!(conn.protocol, Protocol::Vnc);
-                assert_eq!(conn.port, Some(5900));
-            }
-            _ => panic!("esperava conexão solo"),
         }
     }
 }

@@ -46,7 +46,11 @@ pub fn load_document(path: &Path, password: &str) -> Result<Vec<u8>, VaultError>
     let nonce: [u8; 12] = buf[29..41].try_into().unwrap();
     let ciphertext = &buf[41..];
 
-    let params = KdfParams { m_cost, t_cost, p_cost };
+    let params = KdfParams {
+        m_cost,
+        t_cost,
+        p_cost,
+    };
     let key = derive_key(password, &salt, params);
     open(&key, &nonce, ciphertext)
 }

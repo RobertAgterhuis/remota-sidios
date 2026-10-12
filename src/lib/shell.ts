@@ -1,0 +1,98 @@
+// Remota runs in a SidiOS tool window on its own origin (`remota.<domain>`). HTTPS connections open
+// in the SidiOS Browser: Remota asks the shell, on the shell's origin only, and waits for its answer
+// (SidiOS feature 015 US7).
+
+export const OPEN_REQUEST = "sidios.browser.open";
+export const OPEN_RESULT = "sidios.browser.result";
+
+/** The SidiOS shell's origin: this page's host without the `remota.` prefix. */
+export function shellOrigin(
+  location: Pick<Location, "protocol" | "host">,
+): string {
+  return `${location.protocol}//${location.host.replace(/^remota\./u, "")}`;
+}
+
+export type WebScheme = "https" | "http";
+
+/** The address of an HTTPS or HTTP connection: `scheme://host[:port][/path]`. */
+export function webUrl(scheme: WebScheme, host: string, port?: number, path?: string): string {
+  const name = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const page = path && path.startsWith("/") ? path : "/";
+  const standard = scheme === "https" ? 443 : 80;
+  return `${scheme}://${name}${port && port !== standard ? `:${port}` : ""}${page}`;
+}
+
+/** The address of an HTTPS connection: `https://host[:port]/`. */
+export function httpsUrl(host: string, port?: number, path?: string): string {
+  return webUrl("https", host, port, path);
+}
+
+/**
+ * A URL typed or pasted as an HTTPS (or HTTP) connection's host, split into host, port, and path
+ * (with its query). `null` when it is not such a URL without a user name.
+ */
+export function splitHttpsUrl(
+  raw: string,
+  scheme: WebScheme = "https",
+): { host: string; port?: number; path?: string } | null {
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== `${scheme}:` || url.username || url.password || !url.hostname) return null;
+  const page = `${url.pathname}${url.search}`;
+  return {
+    host: url.hostname.replace(/^\[(.*)\]$/u, "$1"),
+    port: url.port ? Number(url.port) : undefined,
+    path: page === "/" ? undefined : page,
+  };
+}
+
+export type OpenResult = { ok: true } | { ok: false; code: string };
+
+/** Asks the shell to open `url` in the SidiOS Browser; gives up after 60 seconds. */
+export function openInSidiosBrowser(
+  url: string,
+  win: Window = window,
+): Promise<OpenResult> {
+  const origin = shellOrigin(win.location);
+  const id = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () => finish({ ok: false, code: "no_answer" }),
+      60_000,
+    );
+    function finish(result: OpenResult) {
+      clearTimeout(timer);
+      win.removeEventListener("message", onMessage);
+      resolve(result);
+    }
+    function onMessage(event: MessageEvent) {
+      const data = event.data as {
+        type?: unknown;
+        id?: unknown;
+        ok?: unknown;
+        code?: unknown;
+      };
+      if (
+        event.origin !== origin ||
+        data?.type !== OPEN_RESULT ||
+        data.id !== id
+      )
+        return;
+      finish(
+        data.ok === true
+          ? { ok: true }
+          : { ok: false, code: String(data.code ?? "failed") },
+      );
+    }
+    win.addEventListener("message", onMessage);
+    if (win.parent === win) {
+      finish({ ok: false, code: "no_shell" });
+      return;
+    }
+    win.parent.postMessage({ id, type: OPEN_REQUEST, url }, origin);
+  });
+}

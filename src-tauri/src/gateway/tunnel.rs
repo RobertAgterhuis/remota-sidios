@@ -41,7 +41,8 @@ pub async fn connect_jump(gw: &Gateway) -> Result<Handle<AcceptAllHandler>, BoxE
         jump.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg))
             .await?
     } else {
-        jump.authenticate_password(user, gw.password.clone().unwrap_or_default()).await?
+        jump.authenticate_password(user, gw.password.clone().unwrap_or_default())
+            .await?
     };
     if !ok.success() {
         return Err("jump host authentication failed".into());

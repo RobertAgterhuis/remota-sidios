@@ -2,8 +2,6 @@ mod commands;
 mod gateway;
 mod importer;
 mod model;
-mod settings;
-mod update;
 mod vault;
 
 use std::sync::Arc;
@@ -15,23 +13,10 @@ use gateway::SessionRegistry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init());
-
-    // Desktop only: a phone has no package to replace.
-    #[cfg(desktop)]
-    {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
-    }
+    let builder = tauri::Builder::default();
 
     builder
         .setup(|app| {
-            // CryptoProvider (ring) para o rustls 0.23 — usado pelas conexões "relayed" (wss).
-            gateway::relay::ensure_crypto_provider();
             let registry = Arc::new(SessionRegistry::new());
             let reg = registry.clone();
             // Inicia o gateway local (127.0.0.1:0) e captura a porta antes de seguir.
@@ -61,9 +46,7 @@ pub fn run() {
             commands::empty_trash,
             commands::import_mremoteng,
             commands::export_connections,
-            commands::import_remota_json,
-            commands::update_policy,
-            commands::set_update_check
+            commands::import_remota_json
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

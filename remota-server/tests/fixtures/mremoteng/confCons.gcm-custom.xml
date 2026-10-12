@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Connections" Export="false" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="10000" FullFileEncryption="false" Protected="uqaCkEBpU0Jl+DiM2yJAj06g7Wm7safob1Qn4anyenqtpYAVK9Kz1Z6/UBWmwolhB+gzaU3rJvndTOcvbuSy" ConfVersion="2.8">
+  <Node Name="Prod" Type="Container" Username="ops" Domain="CORP" Password="qwfNOUQoqv3EznjPvlcZHfRBSqnlGLIabfCUnmpg4HLge1yjand3gnsrzUSHklcU+42xEcMX0l9cVN52l2ZIRORE3A==" InheritUsername="False" InheritPassword="False" InheritDomain="False">
+    <Node Name="web-1" Type="Connection" Protocol="SSH2" Hostname="10.0.0.11" Port="2222" Username="" Password="" InheritUsername="True" InheritPassword="True" InheritDomain="True" />
+    <Node Name="win-1" Type="Connection" Protocol="RDP" Hostname="win1.corp.example" Port="3389" Username="administrator" Domain="CORP" Password="dAumj+u3H3JPg1V8BV1eLrzQp3R/nuwvVypbJlQe2KuKsFQlKDbhNNm+SwLihs5REbWrlDb18nsKZkTMLwuxHg==" InheritUsername="False" InheritPassword="False" InheritDomain="False" />
+    <Node Name="vnc-1" Type="Connection" Protocol="VNC" Hostname="10.0.0.12" Port="5900" />
+    <Node Name="Nested" Type="Container" InheritUsername="True" InheritPassword="True" InheritDomain="True">
+      <Node Name="old-ssh" Type="Connection" Protocol="SSH1" Hostname="10.0.1.5" Port="22" Username="legacy" Password="ZtxRqnQUC/SyG+94h8Wf1Z35teg9rRwrURsu5MWmTlGIk9waYF+ju9LGHyRF871B4iCVR8jlB1/q2k+E69g7OKI=" InheritUsername="False" InheritPassword="False" InheritDomain="True" />
+      <Node Name="same-as-rdp" Type="Connection" Protocol="RDP" Hostname="win2.corp.example" Port="3389" Username="administrator" Domain="CORP" Password="MMlj1CTsvl8y6OzbZa2RXaT+0EjAlP6CV8jmsFTgI25EfD4FhohhOGZp2eDlz7ekrq1/CsOVJ1LhMpr8J3hhbw==" InheritUsername="False" InheritPassword="False" InheritDomain="False" />
+    </Node>
+  </Node>
+  <Node Name="router" Type="Connection" Protocol="Telnet" Hostname="10.0.0.1" Port="23" />
+</mrng:Connections>

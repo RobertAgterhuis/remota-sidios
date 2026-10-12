@@ -1,11 +1,6 @@
-import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
-
-// OS clipboard via the Tauri plugin (via Rust) — works in the WebKitGTK webview, where the
-// browser `navigator.clipboard` API is blocked.
-
 export async function clipRead(): Promise<string> {
   try {
-    return (await readText()) ?? "";
+    return await navigator.clipboard.readText();
   } catch {
     return "";
   }
@@ -13,7 +8,7 @@ export async function clipRead(): Promise<string> {
 
 export async function clipWrite(text: string): Promise<void> {
   try {
-    await writeText(text);
+    await navigator.clipboard.writeText(text);
   } catch {
     /* noop */
   }

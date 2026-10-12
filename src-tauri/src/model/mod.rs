@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 pub enum Protocol {
     Ssh,
     Rdp,
-    Vnc,
-    Telnet,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -22,16 +20,6 @@ pub struct Credentials {
     /// Caminho para a chave privada SSH (auth por chave). Tem prioridade sobre a password no SSH.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_path: Option<String>,
-}
-
-/// Relay self-hosted (remota-relay): liga ao destino através de um agente atrás de NAT.
-/// Se presente numa conexão, o gateway usa o túnel wss do relay em vez de TCP direto.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Relay {
-    /// URL base do relay, ex. `wss://relay.privum.cloud`.
-    pub url: String,
-    /// Id do agente alvo (registado no relay).
-    pub agent_id: String,
 }
 
 /// Jump host (SSH ProxyJump): liga ao destino TUNELADO através deste host.
@@ -58,9 +46,6 @@ pub struct Connection {
     pub credentials: Credentials,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<Gateway>,
-    /// Relay self-hosted (NAT traversal). Se presente, a sessão vai pelo túnel do relay.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay: Option<Relay>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -111,17 +96,27 @@ pub struct Document {
 
 impl Document {
     pub fn empty() -> Self {
-        Self { nodes: Vec::new(), trash: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            trash: Vec::new(),
+        }
     }
 
     /// Remove um nó da árvore e devolve-o com o id da pasta-pai (None = raiz). Para a lixeira.
     pub fn remove_returning(&mut self, id: &str) -> Option<(Node, Option<String>)> {
-        fn walk(nodes: &mut Vec<Node>, id: &str, parent: Option<&str>) -> Option<(Node, Option<String>)> {
+        fn walk(
+            nodes: &mut Vec<Node>,
+            id: &str,
+            parent: Option<&str>,
+        ) -> Option<(Node, Option<String>)> {
             if let Some(pos) = nodes.iter().position(|n| node_id(n) == id) {
                 return Some((nodes.remove(pos), parent.map(|s| s.to_string())));
             }
             for n in nodes.iter_mut() {
-                if let Node::Folder { id: fid, children, .. } = n {
+                if let Node::Folder {
+                    id: fid, children, ..
+                } = n
+                {
                     let pid = fid.clone();
                     if let Some(found) = walk(children, id, Some(&pid)) {
                         return Some(found);
@@ -180,7 +175,6 @@ mod tests {
             port: None,
             credentials: Credentials::default(),
             gateway: None,
-            relay: None,
         }
     }
 
@@ -190,7 +184,10 @@ mod tests {
             nodes: vec![Node::Folder {
                 id: "f1".into(),
                 name: "Prod".into(),
-                defaults: Credentials { username: Some("root".into()), ..Default::default() },
+                defaults: Credentials {
+                    username: Some("root".into()),
+                    ..Default::default()
+                },
                 gateway: None,
                 icon: None,
                 children: vec![Node::Connection {
