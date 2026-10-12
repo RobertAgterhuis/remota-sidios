@@ -209,3 +209,16 @@ export const transferApi = {
     return upload("/api/import/remota", form);
   },
 };
+
+/** Which source this Remota was built from (AGPL-3.0 section 13). */
+export interface About {
+  name: string;
+  version: string;
+  license: string;
+  commit?: string | null;
+  source: string;
+}
+
+export const aboutApi = {
+  get: () => request<About>("GET", "/api/about"),
+};

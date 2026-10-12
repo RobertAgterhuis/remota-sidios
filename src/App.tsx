@@ -20,6 +20,7 @@ import type { Node } from "./lib/api";
 import { colors } from "./components/styles";
 import { downloadFile } from "./lib/browserFiles";
 import { ImportDialog, type ImportKind } from "./components/ImportDialog";
+import { AboutDialog } from "./components/AboutDialog";
 
 type Editing = {
   kind: "connection" | "folder";
@@ -38,6 +39,7 @@ export default function App() {
   const [active, setActive] = useState<string>("editor");
   const [notice, setNotice] = useState<string | null>(null);
   const [importing, setImporting] = useState<ImportKind | null>(null);
+  const [showAbout, setShowAbout] = useState(false);
 
   if (v.status === "loading") return <Center>Loading your connections…</Center>;
   if (v.status === "error")
@@ -200,10 +202,7 @@ export default function App() {
       items: [
         {
           label: "About Remota",
-          onClick: () =>
-            setNotice(
-              "Remota for SidiOS — AGPL-3.0 source: github.com/RobertAgterhuis/remota-sidios",
-            ),
+          onClick: () => setShowAbout(true),
         },
       ],
     },
@@ -212,6 +211,7 @@ export default function App() {
   return (
     <div style={shell}>
       <MenuBar menus={menus} />
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {importing && (
         <ImportDialog
           kind={importing}

@@ -11,6 +11,7 @@ use axum::{
 use serde_json::json;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
+pub mod about;
 pub mod identity;
 pub mod importer;
 pub mod model;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub policy: PolicyClient,
     pub denies: Arc<Denies>,
     pub sessions: Sessions,
+    pub about: Arc<about::About>,
 }
 
 impl AppState {
@@ -53,9 +55,16 @@ impl AppState {
             policy: PolicyClient::new(webos.clone()),
             denies: Arc::new(denies),
             sessions: Sessions::default(),
+            about: Arc::new(about::About::default()),
             store,
             webos,
         }
+    }
+
+    /// The build's source information, for `GET /api/about`.
+    pub fn with_about(mut self, about: about::About) -> Self {
+        self.about = Arc::new(about);
+        self
     }
 }
 
@@ -66,6 +75,7 @@ pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
         .merge(tree::routes())
         .merge(sessions::routes())
         .merge(transfer::routes())
+        .merge(about::routes())
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

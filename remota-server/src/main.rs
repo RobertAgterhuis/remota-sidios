@@ -1,6 +1,7 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use remota_server::{
+    about::About,
     policy::{parse_networks, protected_networks, Denies},
     router, sessions,
     store::Store,
@@ -54,7 +55,11 @@ async fn main() {
     denied.extend(parse_networks(&setting("REMOTA_DENY_CIDRS", "")));
     info!(networks = ?denied, "denied SidiOS networks");
 
-    let state = AppState::with_denies(store, webos.clone(), Denies::new(denied));
+    // The image records the fork commit it was built from (AGPL source offer, FR-016).
+    let commit = fs::read_to_string(setting("REMOTA_COMMIT_FILE", "/opt/remota/COMMIT")).ok();
+    let about = About::new(commit.as_deref());
+    info!(commit = ?about.commit, "Remota build");
+    let state = AppState::with_denies(store, webos.clone(), Denies::new(denied)).with_about(about);
     tokio::spawn(sessions::check_loop(webos, state.sessions.clone()));
 
     let control_listener = TcpListener::bind(control)
