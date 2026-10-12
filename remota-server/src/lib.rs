@@ -12,11 +12,13 @@ use serde_json::json;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
 pub mod identity;
+pub mod importer;
 pub mod model;
 pub mod policy;
 pub mod sessions;
 pub mod ssh;
 pub mod store;
+pub mod transfer;
 pub mod tree;
 pub mod webos;
 
@@ -62,6 +64,7 @@ pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
     let identified = Router::new()
         .merge(tree::routes())
         .merge(sessions::routes())
+        .merge(transfer::routes())
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

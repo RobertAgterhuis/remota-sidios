@@ -18,7 +18,8 @@ import {
 import { ancestors, chainFor, inheritedValues } from "./lib/inherit";
 import type { Node } from "./lib/api";
 import { colors } from "./components/styles";
-import { downloadFile, pickFile, uploadFile } from "./lib/browserFiles";
+import { downloadFile } from "./lib/browserFiles";
+import { ImportDialog, type ImportKind } from "./components/ImportDialog";
 
 type Editing = {
   kind: "connection" | "folder";
@@ -36,6 +37,7 @@ export default function App() {
   });
   const [active, setActive] = useState<string>("editor");
   const [notice, setNotice] = useState<string | null>(null);
+  const [importing, setImporting] = useState<ImportKind | null>(null);
 
   if (v.status === "loading") return <Center>Loading your connections…</Center>;
   if (v.status === "error")
@@ -139,36 +141,12 @@ export default function App() {
     await guarded(() => v.save(targetParentId, node));
   }
 
-  async function importMremoteng() {
-    const file = await pickFile(".xml,text/xml,application/xml");
-    if (!file) return;
-    try {
-      const r = await uploadFile("/api/import/mremoteng", file);
-      await v.refresh();
-      setNotice(r.message);
-    } catch (e) {
-      setNotice("Import failed: " + String(e));
-    }
-  }
-
   async function exportConnections() {
     try {
-      await downloadFile("/api/export", "remota-connections.json");
-      setNotice("Connections exported.");
-    } catch (e) {
-      setNotice("Export failed: " + String(e));
-    }
-  }
-
-  async function importRemotaJson() {
-    const file = await pickFile(".json,application/json");
-    if (!file) return;
-    try {
-      const r = await uploadFile("/api/import/remota", file);
-      await v.refresh();
-      setNotice(r.message);
-    } catch (e) {
-      setNotice("Import failed: " + String(e));
+      await downloadFile("/api/export", "remota-export.json");
+      setNotice("Connections exported, without passwords.");
+    } catch {
+      setNotice("Export failed. Try again.");
     }
   }
 
@@ -208,11 +186,11 @@ export default function App() {
         "sep",
         {
           label: "Import from mRemoteNG (confCons.xml)…",
-          onClick: importMremoteng,
+          onClick: () => setImporting("mremoteng"),
         },
         {
           label: "Import connections (Remota JSON)…",
-          onClick: importRemotaJson,
+          onClick: () => setImporting("remota"),
         },
         { label: "Export connections (JSON)…", onClick: exportConnections },
       ],
@@ -234,6 +212,13 @@ export default function App() {
   return (
     <div style={shell}>
       <MenuBar menus={menus} />
+      {importing && (
+        <ImportDialog
+          kind={importing}
+          onClose={() => setImporting(null)}
+          onImported={() => void v.refresh()}
+        />
+      )}
       <div aria-hidden style={{ height: 2, background: colors.accent }} />
 
       <div style={toolbar}>
