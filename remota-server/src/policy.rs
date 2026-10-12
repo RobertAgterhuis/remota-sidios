@@ -99,6 +99,12 @@ impl Denies {
         Self { networks }
     }
 
+    /// No denies at all, so tests can reach servers on loopback.
+    #[cfg(test)]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
     pub fn denies(&self, ip: IpAddr) -> bool {
         let ip = canonical(ip);
         self.networks.iter().any(|network| network.contains(&ip))

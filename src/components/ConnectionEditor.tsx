@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import type { Node, Protocol } from "../lib/api";
+import { type Node, type Protocol, treeApi } from "../lib/api";
 import type { Inherited } from "../lib/inherit";
 import {
   GatewaySection,
@@ -170,6 +170,23 @@ export function ConnectionEditor({ node, inherited, onSave, onConnect }: Props) 
         {editingId && onConnect && (
           <button type="button" onClick={() => onConnect(editingId)} style={{ ...primaryBtn, background: colors.raised }} title="Open session (same as double-click in the tree)">
             Connect ▸
+          </button>
+        )}
+        {editingId && (
+          <button
+            type="button"
+            style={{ ...primaryBtn, background: "transparent", border: `1px solid ${colors.border}`, color: colors.dim }}
+            title="Use after the server's host key or certificate changed for a reason you know"
+            onClick={async () => {
+              try {
+                const { forgotten } = await treeApi.forgetHostKey(editingId);
+                setMessage({ ok: true, text: forgotten ? "Trusted key forgotten" : "No trusted key was saved" });
+              } catch (e) {
+                setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) });
+              }
+            }}
+          >
+            Forget trusted key
           </button>
         )}
         {message && (

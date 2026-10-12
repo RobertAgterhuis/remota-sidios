@@ -14,11 +14,17 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 pub mod identity;
 pub mod model;
 pub mod policy;
+pub mod sessions;
+pub mod ssh;
 pub mod store;
 pub mod tree;
 pub mod webos;
 
+use std::sync::Arc;
+
 use identity::require_identity;
+use policy::{Denies, PolicyClient};
+use sessions::Sessions;
 use store::Store;
 use webos::SharedWebos;
 
@@ -29,11 +35,24 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub struct AppState {
     pub store: Store,
     pub webos: SharedWebos,
+    pub policy: PolicyClient,
+    pub denies: Arc<Denies>,
+    pub sessions: Sessions,
 }
 
 impl AppState {
     pub fn new(store: Store, webos: SharedWebos) -> Self {
-        Self { store, webos }
+        Self::with_denies(store, webos, Denies::new([]))
+    }
+
+    pub fn with_denies(store: Store, webos: SharedWebos, denies: Denies) -> Self {
+        Self {
+            policy: PolicyClient::new(webos.clone()),
+            denies: Arc::new(denies),
+            sessions: Sessions::default(),
+            store,
+            webos,
+        }
     }
 }
 
@@ -42,6 +61,7 @@ impl AppState {
 pub fn router(ui_dir: PathBuf, state: AppState) -> Router {
     let identified = Router::new()
         .merge(tree::routes())
+        .merge(sessions::routes())
         .route("/api/{*rest}", any(api_not_found))
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

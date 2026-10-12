@@ -49,3 +49,16 @@ describe("tree API client", () => {
     ]);
   });
 });
+
+describe("session messages", () => {
+  it("explains policy and limit refusals", async () => {
+    mockFetch(403, { code: "target_not_allowed" });
+    await expect(treeApi.forgetHostKey("web")).rejects.toMatchObject({
+      message: "This address is not allowed by your administrator.",
+    });
+    mockFetch(429, { code: "session_limit" });
+    await expect(treeApi.forgetHostKey("web")).rejects.toMatchObject({
+      message: "You have reached the number of open sessions. Close one and try again.",
+    });
+  });
+});

@@ -4,20 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { clipRead, clipWrite } from "../lib/clipboard";
 import { colors, ghostBtn, primaryBtn } from "../components/styles";
-
-/** A control message from the server (text frame); terminal output is always binary. */
-export type ControlMessage =
-  | { type: "trust"; host: string; port: number; fingerprint: string }
-  | { type: "error"; message: string };
-
-export function parseControl(text: string): ControlMessage | null {
-  try {
-    const value = JSON.parse(text) as { type?: unknown };
-    return value.type === "trust" || value.type === "error" ? (value as ControlMessage) : null;
-  } catch {
-    return null;
-  }
-}
+import { type ControlMessage, parseControl } from "../lib/control";
 
 /** SSH terminal: the server runs the SSH session; this page only draws it (xterm.js). */
 export function SshView({ wsUrl, onClosed }: { wsUrl: string; onClosed?: () => void }) {

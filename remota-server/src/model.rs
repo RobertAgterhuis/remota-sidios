@@ -318,6 +318,102 @@ impl Document {
     }
 }
 
+/// What a connection uses after inheritance: its own value, else the nearest folder's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Effective {
+    pub name: String,
+    pub protocol: Protocol,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub domain: Option<String>,
+    pub credential_id: Option<String>,
+    pub jump: Option<EffectiveJump>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectiveJump {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub credential_id: Option<String>,
+}
+
+impl Document {
+    /// Resolves a connection's effective settings, or `None` if `id` is not an active connection.
+    pub fn effective(&self, id: &str) -> Option<Effective> {
+        let (chain, node) = self.connection_with_chain(id)?;
+        let Node::Connection { name, conn, .. } = node else {
+            return None;
+        };
+        let folders: Vec<(&Credentials, Option<&Gateway>)> = chain
+            .iter()
+            .rev()
+            .filter_map(|folder| match folder {
+                Node::Folder {
+                    defaults, gateway, ..
+                } => Some((defaults, gateway.as_ref())),
+                Node::Connection { .. } => None,
+            })
+            .collect();
+        let own = &conn.credentials;
+        let inherit = |pick: &dyn Fn(&Credentials) -> Option<String>| {
+            pick(own).or_else(|| folders.iter().find_map(|(defaults, _)| pick(defaults)))
+        };
+        let username = inherit(&|c| c.username.clone());
+        let credential_id = inherit(&|c| c.secret.credential_id.clone());
+        let gateway = conn
+            .gateway
+            .as_ref()
+            .or_else(|| folders.iter().find_map(|(_, gateway)| *gateway));
+        Some(Effective {
+            name: name.clone(),
+            protocol: conn.protocol,
+            host: conn.host.clone(),
+            port: conn.port.unwrap_or(conn.protocol.default_port()),
+            domain: inherit(&|c| c.domain.clone()),
+            jump: gateway.map(|g| EffectiveJump {
+                host: g.host.clone(),
+                port: g.port.unwrap_or(22),
+                // A jump host without its own login uses the connection's.
+                username: g.username.clone().or_else(|| username.clone()),
+                credential_id: g
+                    .secret
+                    .credential_id
+                    .clone()
+                    .or_else(|| credential_id.clone()),
+            }),
+            username,
+            credential_id,
+        })
+    }
+
+    /// Points the connection's own credential at `credential_id` (a secret saved at connect time).
+    pub fn set_connection_credential(&mut self, id: &str, credential_id: String) -> TreeResult<()> {
+        match find_in_mut(&mut self.nodes, id) {
+            Some(Node::Connection { conn, .. }) => {
+                conn.credentials.secret.credential_id = Some(credential_id);
+                Ok(())
+            }
+            _ => Err(TreeError::NotFound),
+        }
+    }
+}
+
+fn find_in_mut<'a>(nodes: &'a mut [Node], id: &str) -> Option<&'a mut Node> {
+    for node in nodes.iter_mut() {
+        if node.id() == id {
+            return Some(node);
+        }
+        if let Node::Folder { children, .. } = node {
+            if let Some(found) = find_in_mut(children, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn find_in<'a>(nodes: &'a [Node], id: &str) -> Option<&'a Node> {
     nodes.iter().find_map(|node| {
         if node.id() == id {
@@ -683,6 +779,68 @@ mod tests {
             doc.upsert(None, conn("c1")),
             Err(TreeError::Invalid("node_in_trash"))
         );
+    }
+
+    #[test]
+    fn resolves_the_nearest_folder_for_each_missing_value() {
+        let mut doc = Document::default();
+        let mut outer = folder("outer", vec![]);
+        if let Node::Folder {
+            defaults, gateway, ..
+        } = &mut outer
+        {
+            defaults.username = Some("root".into());
+            defaults.domain = Some("CORP".into());
+            defaults.secret.credential_id = Some("outer-key".into());
+            *gateway = Some(Gateway {
+                host: "bastion".into(),
+                ..Gateway::default()
+            });
+        }
+        let mut inner = folder("inner", vec![]);
+        if let Node::Folder { defaults, .. } = &mut inner {
+            defaults.username = Some("deploy".into());
+        }
+        doc.upsert(None, outer).unwrap();
+        doc.upsert(Some("outer"), inner).unwrap();
+        doc.upsert(Some("inner"), conn("web")).unwrap();
+
+        let effective = doc.effective("web").unwrap();
+        assert_eq!(effective.username.as_deref(), Some("deploy"));
+        assert_eq!(effective.domain.as_deref(), Some("CORP"));
+        assert_eq!(effective.credential_id.as_deref(), Some("outer-key"));
+        assert_eq!(effective.port, 22);
+        let jump = effective.jump.unwrap();
+        assert_eq!((jump.host.as_str(), jump.port), ("bastion", 22));
+        assert_eq!(
+            jump.username.as_deref(),
+            Some("deploy"),
+            "falls back to the connection's"
+        );
+        assert_eq!(jump.credential_id.as_deref(), Some("outer-key"));
+        assert!(
+            doc.effective("inner").is_none(),
+            "folders are not connections"
+        );
+        assert!(doc.effective("missing").is_none());
+    }
+
+    #[test]
+    fn a_connections_own_values_win() {
+        let mut doc = Document::default();
+        let mut outer = folder("outer", vec![]);
+        if let Node::Folder { defaults, .. } = &mut outer {
+            defaults.username = Some("root".into());
+        }
+        doc.upsert(None, outer).unwrap();
+        doc.upsert(Some("outer"), with_secret("web", "own-key"))
+            .unwrap();
+        doc.set_connection_credential("web", "newer".into())
+            .unwrap();
+        let effective = doc.effective("web").unwrap();
+        assert_eq!(effective.username.as_deref(), Some("root"));
+        assert_eq!(effective.credential_id.as_deref(), Some("newer"));
+        assert!(effective.jump.is_none());
     }
 
     #[test]
